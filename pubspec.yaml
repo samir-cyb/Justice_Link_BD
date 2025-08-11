@@ -1,0 +1,58 @@
+name: justice_link_user
+description: "A new Flutter project."
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.8.0 <4.0.0"  # More precise SDK constraint
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6  # Slightly older but more stable version
+  provider: ^6.1.1        # Good version for state management
+  image_picker: ^1.0.4    # Updated to latest stable
+  flutter_svg: ^2.0.9     # Correct for SVG support
+  shimmer: ^2.0.0         # Good for loading effects
+  permission_handler: ^11.1.0  # Updated for better permission handling
+  supabase_flutter: ^2.9.1  # Good for backend
+  flutter_map: ^8.1.1     # Updated to latest stable
+  latlong2: ^0.9.0        # Required for flutter_map
+  http: ^1.1.0            # Added for network requests
+  intl: ^0.18.1           # Added for internationalization
+  flutter_animate: ^4.1.1+1 # Added for enhanced animations
+  path_provider: ^2.1.5
+  path: ^1.8.3
+  universal_html: ^2.2.4
+  flutter_local_notifications: ^19.3.0
+  google_maps_flutter: ^2.12.3
+  geolocator: ^14.0.1
+  flutter_polyline_points: ^2.1.0
+  flutter_map_cancellable_tile_provider: ^3.1.0
+  hex: ^0.2.0
+  flutter_launcher_icons: ^0.9.0  # Works with image 3.x
+  tflite_flutter_helper: ^0.2.1
+  tflite_flutter: ^0.9.0          # For mobile
+  nlp: ^0.0.0
+  flutter_staggered_animations: ^1.1.1
+  flip_card: ^0.7.0
+  collection: ^1.19.1
+
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0   # Good for code quality
+
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/models/crime_classifier.tflite
+    - assets/vectorizer/vocab.json
+
+
+  fonts:
+    - family: Roboto
