@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
@@ -8,6 +7,7 @@ import 'package:justice_link_user/screens/emergency_service.dart';
 import 'package:justice_link_user/screens/emergency_location_card_style.dart';
 import 'package:intl/intl.dart';
 import 'package:hex/hex.dart';
+import 'package:audioplayers/audioplayers.dart';
 
 class EmergencySupportScreen extends StatefulWidget {
   final String currentUserId;
@@ -25,10 +25,11 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
   final SupabaseClient _supabase = Supabase.instance.client;
   final EmergencyService _emergencyService = EmergencyService();
   late FlutterLocalNotificationsPlugin _notificationsPlugin;
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  bool _isPlayingAlarm = false;
   List<Map<String, dynamic>> _activeEmergencies = [];
   bool _isLoading = true;
   RealtimeChannel? _channel;
-  Timer? _debounceTimer;
 
   @override
   void initState() {
@@ -42,7 +43,7 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
   @override
   void dispose() {
     _channel?.unsubscribe();
-    _debounceTimer?.cancel();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -61,15 +62,39 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
     );
   }
 
+  Future<void> _playEmergencyAlarm() async {
+    if (_isPlayingAlarm) return;
+
+    setState(() => _isPlayingAlarm = true);
+
+    try {
+      await _audioPlayer.play(AssetSource('sounds/emergency_alarm.mp3'));
+      await _audioPlayer.setReleaseMode(ReleaseMode.loop);
+    } catch (e) {
+      print('Error playing alarm: $e');
+      setState(() => _isPlayingAlarm = false);
+    }
+  }
+
+  Future<void> _stopEmergencyAlarm() async {
+    if (!_isPlayingAlarm) return;
+
+    try {
+      await _audioPlayer.stop();
+    } catch (e) {
+      print('Error stopping alarm: $e');
+    } finally {
+      setState(() => _isPlayingAlarm = false);
+    }
+  }
+
   Future<void> _fetchActiveEmergencies() async {
-    setState(() => _isLoading = true);
     try {
       final emergencies = await _emergencyService.getActiveEmergencies();
       setState(() {
         _activeEmergencies = List<Map<String, dynamic>>.from(emergencies);
         _isLoading = false;
 
-        // Debug: Print all emergencies with their location data
         print('Fetched ${_activeEmergencies.length} emergencies:');
         for (var emergency in _activeEmergencies) {
           print('Emergency ID: ${emergency['id']}');
@@ -78,22 +103,15 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
         }
       });
 
-      // Trigger notifications asynchronously
-      _triggerNotificationsForEmergencies();
+      for (final emergency in _activeEmergencies) {
+        if (emergency['user_id'] != widget.currentUserId &&
+            emergency['status'] == 'active') {
+          _showEmergencyNotification();
+        }
+      }
     } catch (e) {
       setState(() => _isLoading = false);
       print('Error fetching emergencies: $e');
-    }
-  }
-
-  Future<void> _triggerNotificationsForEmergencies() async {
-    for (final emergency in _activeEmergencies) {
-      if (emergency['user_id'] != widget.currentUserId &&
-          emergency['status'] == 'active') {
-        await _showEmergencyNotification();
-        // Add a small delay to prevent notification spam
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
     }
   }
 
@@ -105,10 +123,7 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
       schema: 'public',
       table: 'emergencies',
       callback: (payload) {
-        if (_debounceTimer?.isActive ?? false) return;
-        _debounceTimer = Timer(const Duration(milliseconds: 300), () {
-          _handleRealtimeUpdate(payload);
-        });
+        _handleRealtimeUpdate(payload);
       },
     ).subscribe();
   }
@@ -121,10 +136,10 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
           if (newRecord != null &&
               newRecord['user_id'] != widget.currentUserId &&
               newRecord['status'] == 'active') {
+            _showEmergencyNotification();
             setState(() {
               _activeEmergencies.add(newRecord);
             });
-            _showEmergencyNotification();
           }
           break;
 
@@ -159,6 +174,8 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
   }
 
   Future<void> _showEmergencyNotification() async {
+    await _playEmergencyAlarm();
+
     const AndroidNotificationDetails androidPlatformChannelSpecifics =
     AndroidNotificationDetails(
       'emergency_channel',
@@ -166,6 +183,7 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
       importance: Importance.max,
       priority: Priority.high,
       ticker: 'ticker',
+      playSound: false,
     );
 
     const NotificationDetails platformChannelSpecifics =
@@ -203,11 +221,13 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
 
       final endian = byteData.getUint8(0) == 1 ? Endian.little : Endian.big;
       final type = byteData.getUint32(1, endian);
+      final hasSrid = (type & 0x20000000) != 0;
+
       int offset = 5;
 
-      final hasSrid = (type & 0x20000000) != 0;
       if (hasSrid) {
-        byteData.getUint32(offset, endian);
+        final srid = byteData.getUint32(offset, endian);
+        print('SRID: $srid');
         offset += 4;
       }
 
@@ -226,21 +246,13 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
   LatLng _parseLocation(dynamic location) {
     try {
       print('Parsing location: $location (type: ${location.runtimeType})');
+
       if (location is String) {
         if (location.startsWith('010100')) {
           return _parseWkbLocation(location);
-        } else if (location.startsWith('POINT(')) {
-          final coords = location
-              .replaceAll('POINT(', '')
-              .replaceAll(')', '')
-              .split(' ')
-              .map((s) => double.tryParse(s) ?? 0.0)
-              .toList();
-          if (coords.length == 2) {
-            return LatLng(coords[1], coords[0]); // latitude, longitude
-          }
         }
       }
+
       print('Unhandled location format');
       return const LatLng(0, 0);
     } catch (e) {
@@ -251,54 +263,67 @@ class _EmergencySupportScreenState extends State<EmergencySupportScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: RadialGradient(
-            center: Alignment.topRight,
-            radius: 1.5,
-            colors: [
-              Color(0xFF0F2027),
-              Color(0xFF203A43),
-              Color(0xFF2C5364),
-            ],
-            stops: [0.0, 0.5, 1.0],
+    return Stack(
+      children: [
+        Container(
+          decoration: const BoxDecoration(
+            gradient: RadialGradient(
+              center: Alignment.topRight,
+              radius: 1.5,
+              colors: [
+                Color(0xFF0F2027),
+                Color(0xFF203A43),
+                Color(0xFF2C5364),
+              ],
+              stops: [0.0, 0.5, 1.0],
+            ),
           ),
-        ),
-        padding: const EdgeInsets.only(top: 80),
-        child: _isLoading
-            ? const Center(child: CircularProgressIndicator())
-            : _activeEmergencies.isEmpty
-            ? const Center(
-          child: Text(
-            'No active emergencies',
-            style: TextStyle(color: Colors.white70, fontSize: 18),
-          ),
-        )
-            : ListView.builder(
-          padding: const EdgeInsets.all(16),
-          itemCount: _activeEmergencies.length,
-          itemBuilder: (context, index) {
-            final emergency = _activeEmergencies[index];
-            final location = emergency['location'];
-            final parsedLocation = _parseLocation(location);
+          padding: const EdgeInsets.only(top: 80),
+          child: _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : _activeEmergencies.isEmpty
+              ? const Center(
+            child: Text(
+              'No active emergencies',
+              style: TextStyle(color: Colors.white70, fontSize: 18),
+            ),
+          )
+              : ListView.builder(
+            padding: const EdgeInsets.all(16),
+            itemCount: _activeEmergencies.length,
+            itemBuilder: (context, index) {
+              final emergency = _activeEmergencies[index];
+              final location = emergency['location'];
+              final parsedLocation = _parseLocation(location);
 
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 16),
-              child: EmergencyLocationCard(
-                location: parsedLocation,
-                timestamp: DateTime.tryParse(
-                    emergency['created_at']?.toString() ?? '') ??
-                    DateTime.now(),
-                userId: emergency['user_id']?.toString() ?? 'Unknown',
-                onRespond: () =>
-                    _respondToEmergency(emergency['id']?.toString() ?? ''),
-                isOwnEmergency: emergency['user_id'] == widget.currentUserId,
-              ),
-            );
-          },
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: EmergencyLocationCard(
+                  location: parsedLocation,
+                  timestamp: DateTime.tryParse(
+                      emergency['created_at']?.toString() ?? '') ??
+                      DateTime.now(),
+                  userId: emergency['user_id']?.toString() ?? 'Unknown',
+                  onRespond: () => _respondToEmergency(
+                      emergency['id']?.toString() ?? ''),
+                  isOwnEmergency:
+                  emergency['user_id'] == widget.currentUserId,
+                ),
+              );
+            },
+          ),
         ),
-      ),
+        if (_isPlayingAlarm)
+          Positioned(
+            bottom: 20,
+            right: 20,
+            child: FloatingActionButton(
+              onPressed: _stopEmergencyAlarm,
+              backgroundColor: Colors.red,
+              child: const Icon(Icons.notifications_off),
+            ),
+          ),
+      ],
     );
   }
 }

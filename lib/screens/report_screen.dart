@@ -13,6 +13,7 @@ import 'package:justice_link_user/screens/emergency_support_screen.dart';
 import 'package:justice_link_user/screens/emergency_service.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:device_info_plus/device_info_plus.dart'; // Added for device ID
 
 // Conditional import for classifier
 import 'package:justice_link_user/screens/text_classifier.dart'
@@ -52,6 +53,7 @@ class _ReportScreenState extends State<ReportScreen>
   late TextClassifier _textClassifier;
   bool _classifierInitialized = false;
   Map<String, dynamic>? _prediction;
+  String _deviceId = 'unknown_device'; // Added for device tracking
 
   @override
   void initState() {
@@ -60,6 +62,30 @@ class _ReportScreenState extends State<ReportScreen>
     _initAnimations();
     _requestLocationPermission();
     _initializeClassifier();
+    _getDeviceId(); // Added to initialize device ID
+  }
+
+  // Added new method for device ID
+  Future<void> _getDeviceId() async {
+    try {
+      final DeviceInfoPlugin deviceInfo = DeviceInfoPlugin();
+      if (kIsWeb) {
+        final webInfo = await deviceInfo.webBrowserInfo;
+        _deviceId = 'web_${webInfo.userAgent?.hashCode ?? 'unknown'}';
+      } else {
+        if (Platform.isAndroid) {
+          final androidInfo = await deviceInfo.androidInfo;
+          _deviceId = 'android_${androidInfo.id}';
+        } else if (Platform.isIOS) {
+          final iosInfo = await deviceInfo.iosInfo;
+          _deviceId = 'ios_${iosInfo.identifierForVendor}';
+        }
+      }
+    } catch (e) {
+      debugPrint('Error getting device ID: $e');
+      _deviceId = 'error_${DateTime.now().millisecondsSinceEpoch}';
+    }
+    if (mounted) setState(() {});
   }
 
   @override
@@ -394,6 +420,7 @@ class _ReportScreenState extends State<ReportScreen>
         'predicted_label': _prediction?['label'],
         'predicted_confidence': _predictionConfidence,
         'risk_score': _calculateRiskScore(isDangerous),
+        'device_id': _deviceId, // Added device ID to report
       });
 
       if (isDangerous) {
@@ -416,14 +443,24 @@ class _ReportScreenState extends State<ReportScreen>
 
   double _calculateRiskScore(bool isDangerous) {
     double score = 0;
-    if (isDangerous) {
-      score += (_predictionConfidence ?? 0) * 80;
-    } else {
-      score += (_predictionConfidence ?? 0) * 30;
+
+    // Adjusted weights
+    switch (_prediction?['label']) {
+      case 'dangerous':
+        score = 80 + ((_predictionConfidence ?? 0) * 30); // 70-100 range
+        break;
+      case 'suspicious':
+        score = 25 + ((_predictionConfidence ?? 0) * 25); // 30-70 range
+        break;
+      case 'fake':
+        score = 5 + ((_predictionConfidence ?? 0) * 5); // 10-20 range
+        break;
+      default: // normal
+        score = 15 + ((_predictionConfidence ?? 0) * 15); // 20-40 range
     }
-    if (_isLocationSharing) {
-      score += 20;
-    }
+
+    if (_isLocationSharing) score += 15; // Smaller bonus for emergencies
+
     return score.clamp(0, 100).toDouble();
   }
 
@@ -754,7 +791,6 @@ class _ReportScreenState extends State<ReportScreen>
       child: Stack(
         alignment: Alignment.center,
         children: [
-          // 3D effect with shadows and gradients
           Container(
             width: 200,
             height: 200,
@@ -777,7 +813,6 @@ class _ReportScreenState extends State<ReportScreen>
               ],
             ),
           ),
-          // Inner circle for depth
           Container(
             width: 180,
             height: 180,
@@ -786,7 +821,6 @@ class _ReportScreenState extends State<ReportScreen>
               color: Colors.white.withOpacity(0.1),
             ),
           ),
-          // Text or Icon
           Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -807,7 +841,6 @@ class _ReportScreenState extends State<ReportScreen>
               ),
             ],
           ),
-          // Progress indicator
           if (_isHolding)
             CircularProgressIndicator(
               value: _holdProgress,
@@ -815,7 +848,6 @@ class _ReportScreenState extends State<ReportScreen>
               backgroundColor: Colors.white.withOpacity(0.3),
               valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
             ),
-          // Stop sharing button
           if (_isLocationSharing)
             Positioned(
               bottom: 10,

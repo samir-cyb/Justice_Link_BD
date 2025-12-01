@@ -20,7 +20,7 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
   final SupabaseClient _supabase = Supabase.instance.client;
   List<Map<String, dynamic>> _reports = [];
   bool _isLoading = true;
-  int _selectedFilter = 0; // 0: All, 1: Urgent, 2: Recent
+  int _selectedFilter = 0;
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
   final ScrollController _scrollController = ScrollController();
@@ -71,110 +71,193 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
 
         for (var report in _reports) {
           final id = report['id'].toString();
-          if (!_cardKeys.containsKey(id)) {
-            _cardKeys[id] = GlobalKey<FlipCardState>();
-          }
-          if (!_hoverControllers.containsKey(id)) {
-            _hoverControllers[id] = AnimationController(
-              vsync: this,
-              duration: const Duration(milliseconds: 300),
-            );
-            _isHovering[id] = false;
-          }
+          _cardKeys[id] ??= GlobalKey<FlipCardState>();
+          _hoverControllers[id] ??= AnimationController(
+            vsync: this,
+            duration: const Duration(milliseconds: 300),
+          );
+          _isHovering[id] ??= false;
         }
       });
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
+      if (mounted) setState(() => _isLoading = false);
       debugPrint('Error loading reports: $e');
     }
   }
 
   Future<void> _updateVote(String reportId, String voteType) async {
     final userId = Provider.of<AuthService>(context, listen: false).currentUser?.uid;
-    if (userId == null) return;
+    if (userId == null) {
+      debugPrint('Cannot vote - no user ID');
+      return;
+    }
 
-    int currentReportIndex = -1;
     try {
-      currentReportIndex = _reports.indexWhere((report) => report['id'].toString() == reportId);
-      if (currentReportIndex == -1) return;
-
-      final currentReport = Map<String, dynamic>.from(_reports[currentReportIndex]);
-      final currentVotes = Map<String, dynamic>.from(
-          (currentReport['votes'] as Map<String, dynamic>?) ??
-              {'fake': 0, 'normal': 0, 'dangerous': 0, 'suspicious': 0}
-      );
-      final currentUserVotes = Map<String, String>.from(
-          (currentReport['user_votes'] as Map<String, dynamic>? ?? {})
-              .map((key, value) => MapEntry(key, value.toString())));
-
-      final previousVote = currentUserVotes[userId];
-
-      if (previousVote == voteType) {
-        setState(() {
-          currentVotes[voteType] = (currentVotes[voteType] as int? ?? 0) - 1;
-          currentUserVotes.remove(userId);
-          _reports[currentReportIndex] = {
-            ...currentReport,
-            'votes': currentVotes,
-            'user_votes': currentUserVotes,
-          };
-        });
-
-        final response = await _supabase.from('reports').update({
-          'votes': currentVotes,
-          'user_votes': currentUserVotes,
-        }).eq('id', reportId);
-
-        if (response.error != null) {
-          setState(() {
-            _reports[currentReportIndex] = currentReport;
-          });
-          debugPrint('Update failed: ${response.error!.message}');
-          return;
-        }
+      final reportIndex = _reports.indexWhere((r) => r['id'].toString() == reportId);
+      if (reportIndex == -1) {
+        debugPrint('Report not found');
         return;
       }
 
-      if (previousVote != null) {
-        currentVotes[previousVote] = (currentVotes[previousVote] as int? ?? 0) - 1;
+      final report = Map<String, dynamic>.from(_reports[reportIndex]);
+      final votes = Map<String, dynamic>.from(
+          report['votes'] ?? {'fake': 0, 'normal': 0, 'dangerous': 0, 'suspicious': 0}
+      );
+
+      final userVotes = Map<String, String>.from(
+          (report['user_votes'] as Map<String, dynamic>? ?? <String, dynamic>{})
+              .map((key, value) => MapEntry(key, value.toString()))
+          );
+
+          final aiLabel = report['predicted_label'] as String? ?? 'normal';
+      final aiConfidence = (report['predicted_confidence'] as num?)?.toDouble() ?? 0.5;
+
+      double voteWeight = _calculateVoteWeight(voteType, aiLabel, aiConfidence);
+
+      final previousVote = userVotes[userId];
+
+      if (previousVote != null && previousVote == voteType) {
+        // Remove existing vote - convert to double before subtraction
+        votes[previousVote] = (votes[previousVote] as num).toDouble() - 1;
+        userVotes.remove(userId);
+      } else {
+        // Apply new weighted vote - ensure we're working with doubles
+        if (previousVote != null) {
+          votes[previousVote] = (votes[previousVote] as num).toDouble() - 1;
+        }
+        votes[voteType] = ((votes[voteType] as num?)?.toDouble() ?? 0) + voteWeight;
+        userVotes[userId] = voteType;
       }
 
-      currentVotes[voteType] = (currentVotes[voteType] as int? ?? 0) + 1;
-      currentUserVotes[userId] = voteType;
+      // Calculate new risk score
+      final newRiskScore = _calculateDynamicRiskScore(
+        report,
+        votes,
+        aiLabel: aiLabel,
+        aiConfidence: aiConfidence,
+      );
 
+      // Update UI immediately
       setState(() {
-        _reports[currentReportIndex] = {
-          ...currentReport,
-          'votes': currentVotes,
-          'user_votes': currentUserVotes,
+        _reports[reportIndex] = {
+          ...report,
+          'votes': votes,
+          'user_votes': userVotes,
+          'risk_score': newRiskScore,
         };
       });
 
+      // Sync with database - ensure we're sending proper numeric types
       final response = await _supabase.from('reports').update({
-        'votes': currentVotes,
-        'user_votes': currentUserVotes,
+        'votes': votes.map((k, v) => MapEntry(k, v is int ? v.toDouble() : v)),
+        'user_votes': userVotes,
+        'risk_score': newRiskScore,
       }).eq('id', reportId);
 
       if (response.error != null) {
-        setState(() {
-          _reports[currentReportIndex] = currentReport;
-        });
-        debugPrint('Update failed: ${response.error!.message}');
-        _loadReports();
+        debugPrint('Failed to update report: ${response.error!.message}');
+        if (mounted) _loadReports(); // Refresh on error
       }
+
     } catch (e) {
-      debugPrint('Error updating vote: $e');
-      if (mounted && currentReportIndex != -1) {
-        setState(() {
-          _reports[currentReportIndex] = _reports[currentReportIndex];
-        });
-        _loadReports();
+      debugPrint('Error in _updateVote: $e');
+      if (mounted) _loadReports(); // Refresh on error
+    }
+  }
+
+  double _calculateVoteWeight(String voteType, String aiLabel, double aiConfidence) {
+    double weight = 1.0;
+
+    if (aiConfidence > 0.7) {
+      if (aiLabel == 'dangerous' && voteType == 'fake') {
+        weight *= 0.3;
+      } else if (aiLabel == 'fake' && voteType == 'dangerous') {
+        weight *= 0.5;
       }
     }
+
+    if ((aiLabel == 'dangerous' && voteType == 'dangerous') ||
+        (aiLabel == 'fake' && voteType == 'fake')) {
+      weight *= 1.5;
+    }
+
+    return weight;
+  }
+
+  double _calculateDynamicRiskScore(
+      Map<String, dynamic> report,
+      Map<String, dynamic> votes, {
+        required String aiLabel,
+        required double aiConfidence,
+      }) {
+    final aiWeight = 0.3 + (aiConfidence * 0.4);
+    double aiScore = 0;
+
+    switch (aiLabel) {
+      case 'dangerous': aiScore = 80; break;
+      case 'suspicious': aiScore = 40; break;
+      case 'fake': aiScore = 5; break;
+      default: aiScore = 20;
+    }
+
+    final totalVotes = votes.values.fold<double>(0, (sum, v) => sum + (v is num ? v.toDouble() : 0));
+    final dangerRatio = totalVotes > 0 ? ((votes['dangerous'] as num?)?.toDouble() ?? 0) / totalVotes : 0;
+    final communityScore = dangerRatio * 100;
+
+    double score = (aiScore * aiWeight) + (communityScore * (1 - aiWeight));
+
+    if (report['is_emergency'] == true) score += 15;
+
+    return score.clamp(0, 100).toDouble();
+  }
+
+  Color _getCardColor(Map<String, dynamic> report) {
+    final votes = report['votes'] ?? {
+      'dangerous': 0,
+      'suspicious': 0,
+      'normal': 0,
+      'fake': 0
+    };
+
+    final dangerousVotes = (votes['dangerous'] as num?)?.toDouble() ?? 0;
+    final suspiciousVotes = (votes['suspicious'] as num?)?.toDouble() ?? 0;
+    final fakeVotes = (votes['fake'] as num?)?.toDouble() ?? 0;
+    final aiLabel = report['predicted_label'] ?? 'normal';
+
+    // AI detected FAKE report
+    if (aiLabel == 'fake') {
+      if (dangerousVotes >= 3) return Colors.red[900]!;       // 3+ dangerous = Red
+      if (dangerousVotes >= 2) return Colors.orange[800]!;    // 2 dangerous = Orange
+      if (dangerousVotes >= 1) return Colors.yellow[800]!;    // 1 dangerous = Yellow
+      return Colors.purple[700]!;                             // Default for fake
+    }
+
+    // AI detected DANGEROUS report
+    if (aiLabel == 'dangerous') {
+      if (fakeVotes >= 3) return Colors.purple[700]!;         // 3+ fake = Purple
+      if (fakeVotes >= 2) return Colors.blueGrey[600]!;       // 2 fake = Grey-Blue
+      return Colors.red[900]!;                                // Default for dangerous
+    }
+
+    // AI detected SUSPICIOUS report
+    if (aiLabel == 'suspicious') {
+      if (fakeVotes >= 3) return Colors.purple[700]!;         // 3+ fake = Purple
+      if (fakeVotes >= 2) return Colors.blueGrey[600]!;       // 2 fake = Grey-Blue
+      if (dangerousVotes >= 2) return Colors.red[900]!;       // 2+ dangerous = Red
+      return Colors.yellow[800]!;                             // Default for suspicious
+    }
+
+    // AI detected NORMAL report
+    if (aiLabel == 'normal') {
+      if (dangerousVotes >= 3) return Colors.red[900]!;       // 3+ dangerous = Red
+      if (dangerousVotes >= 2) return Colors.orange[800]!;    // 2 dangerous = Orange
+      if (suspiciousVotes >= 3) return Colors.yellow[800]!;   // 3+ suspicious = Yellow
+      if (fakeVotes >= 3) return Colors.purple[700]!;         // 3+ fake = Purple
+      return Colors.grey[800]!;                               // Default for normal
+    }
+
+    // Fallback
+    return Colors.grey[800]!;
   }
 
   String _formatDate(DateTime date) {
@@ -187,24 +270,6 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
     if (difference.inDays < 7) return '${difference.inDays}d ago';
 
     return DateFormat('MMM dd, yyyy').format(date);
-  }
-
-  Color _getCardColor(Map<String, dynamic> report) {
-    final votes = (report['votes'] as Map<String, dynamic>?) ??
-        {'fake': 0, 'normal': 0, 'dangerous': 0, 'suspicious': 0};
-    final totalVotes = votes.values.fold(0, (sum, value) => sum + (value is int ? value : 0));
-    if (totalVotes == 0) return Colors.grey[900]!;
-
-    final dangerRatio = (votes['dangerous'] as int? ?? 0) / totalVotes;
-    final suspiciousRatio = (votes['suspicious'] as int? ?? 0) / totalVotes;
-    final fakeRatio = (votes['fake'] as int? ?? 0) / totalVotes;
-
-    if (dangerRatio > 0.5) return Colors.red[900]!;
-    if (dangerRatio > 0.3) return Colors.red[700]!;
-    if (suspiciousRatio > 0.5) return Colors.yellow[800]!;
-    if (fakeRatio > 0.5) return Colors.purple[700]!;
-    if (dangerRatio + suspiciousRatio > 0.5) return Colors.blueGrey[800]!;
-    return Colors.grey[800]!;
   }
 
   Stream<String> _getInvestigationStatusStream(String reportId) {
@@ -234,7 +299,7 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
     required IconData icon,
     required String tooltip,
     required VoidCallback onPressed,
-    required int count,
+    required double count,
     required Color color,
     required bool isSelected,
     required String reportId,
@@ -289,8 +354,8 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
                 return ScaleTransition(scale: animation, child: child);
               },
               child: Text(
-                '$count',
-                key: ValueKey<int>(count),
+                count.toStringAsFixed(count.truncateToDouble() == count ? 0 : 1),
+                key: ValueKey<double>(count),
                 style: TextStyle(
                   color: isSelected ? color : Colors.white70,
                   fontSize: 14,
@@ -377,13 +442,13 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
   List<Map<String, dynamic>> _filterReports(List<Map<String, dynamic>> reports) {
     final now = DateTime.now();
     switch (_selectedFilter) {
-      case 1: // Urgent
+      case 1:
         return reports.where((report) {
           final votes = (report['votes'] as Map<String, dynamic>?) ?? {'dangerous': 0};
           final isEmergency = report['is_emergency'] as bool? ?? false;
-          return (votes['dangerous'] as int? ?? 0) >= 3 || isEmergency;
+          return ((votes['dangerous'] as num?)?.toDouble() ?? 0) >= 3 || isEmergency;
         }).toList();
-      case 2: // Recent
+      case 2:
         final twentyFourHoursAgo = now.subtract(const Duration(hours: 24));
         return reports.where((report) {
           final createdAt = (report['created_at'] as String?)?.isNotEmpty == true
@@ -391,7 +456,7 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
               : now;
           return createdAt.isAfter(twentyFourHoursAgo);
         }).toList();
-      default: // All
+      default:
         return reports;
     }
   }
@@ -408,6 +473,11 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
     required Color cardColor,
     required Color textColor,
   }) {
+    final report = _reports.firstWhere((r) => r['id'].toString() == reportId);
+    final aiLabel = report['predicted_label'] ?? 'normal';
+    final isConflict = (aiLabel == 'fake' && ((votes['dangerous'] as num?)?.toDouble() ?? 0) >= 2) ||
+        (aiLabel == 'dangerous' && ((votes['fake'] as num?)?.toDouble() ?? 0) >= 3);
+
     return StreamBuilder<String>(
       stream: _getInvestigationStatusStream(reportId),
       builder: (context, snapshot) {
@@ -422,7 +492,6 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
           builder: (context, child) {
             final hoverValue = _hoverControllers[reportId]!.value;
             final scale = 1.0 + hoverValue * 0.05;
-            final elevation = 8.0 + hoverValue * 4.0;
 
             return Transform(
               transform: Matrix4.identity()
@@ -432,10 +501,7 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
               child: Container(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
-                    colors: [
-                      cardColor,
-                      cardColor.darken(0.1),
-                    ],
+                    colors: [cardColor, cardColor.darken(0.1)],
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
                   ),
@@ -462,10 +528,29 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            if (isConflict)
+                              Align(
+                                alignment: Alignment.topRight,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: Colors.orange[800],
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.warning, size: 14, color: Colors.white),
+                                      const SizedBox(width: 4),
+                                      Text('Community Disagrees', style: const TextStyle(color: Colors.white)),
+                                    ],
+                                  ),
+                                ),
+                              ),
                             Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                if ((votes['dangerous'] as int? ?? 0) >= 3 || isEmergency)
+                                if (((votes['dangerous'] as num?)?.toDouble() ?? 0) >= 3 || isEmergency)
                                   Padding(
                                     padding: const EdgeInsets.only(right: 12.0),
                                     child: Icon(
@@ -483,7 +568,7 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
                                         style: TextStyle(
                                           color: textColor,
                                           fontSize: 18,
-                                          fontWeight: (votes['dangerous'] as int? ?? 0) >= 3 || isEmergency
+                                          fontWeight: ((votes['dangerous'] as num?)?.toDouble() ?? 0) >= 3 || isEmergency
                                               ? FontWeight.bold
                                               : FontWeight.w500,
                                           letterSpacing: 0.5,
@@ -604,7 +689,7 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
                                               ),
                                             ),
                                       ),
-                                      if ((votes['dangerous'] as int? ?? 0) >= 3 || isEmergency)
+                                      if (((votes['dangerous'] as num?)?.toDouble() ?? 0) >= 3 || isEmergency)
                                         Positioned(
                                           top: 10,
                                           right: 10,
@@ -694,7 +779,6 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
       builder: (context, child) {
         final hoverValue = _hoverControllers[reportId]!.value;
         final scale = 1.0 + hoverValue * 0.05;
-        final elevation = 8.0 + hoverValue * 4.0;
 
         return Transform(
           transform: Matrix4.identity()
@@ -755,7 +839,7 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
                               icon: Icons.local_fire_department,
                               tooltip: 'Dangerous',
                               onPressed: () => _updateVote(reportId, 'dangerous'),
-                              count: votes['dangerous'] as int? ?? 0,
+                              count: (votes['dangerous'] as num?)?.toDouble() ?? 0,
                               color: Colors.red[700]!,
                               isSelected: userVote == 'dangerous',
                               reportId: reportId,
@@ -764,7 +848,7 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
                               icon: Icons.warning_amber_rounded,
                               tooltip: 'Suspicious',
                               onPressed: () => _updateVote(reportId, 'suspicious'),
-                              count: votes['suspicious'] as int? ?? 0,
+                              count: (votes['suspicious'] as num?)?.toDouble() ?? 0,
                               color: Colors.yellow[800]!,
                               isSelected: userVote == 'suspicious',
                               reportId: reportId,
@@ -773,7 +857,7 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
                               icon: Icons.check_circle_outline,
                               tooltip: 'Normal',
                               onPressed: () => _updateVote(reportId, 'normal'),
-                              count: votes['normal'] as int? ?? 0,
+                              count: (votes['normal'] as num?)?.toDouble() ?? 0,
                               color: Colors.green[600]!,
                               isSelected: userVote == 'normal',
                               reportId: reportId,
@@ -782,7 +866,7 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
                               icon: Icons.block,
                               tooltip: 'Fake',
                               onPressed: () => _updateVote(reportId, 'fake'),
-                              count: votes['fake'] as int? ?? 0,
+                              count: (votes['fake'] as num?)?.toDouble() ?? 0,
                               color: Colors.purpleAccent[700]!,
                               isSelected: userVote == 'fake',
                               reportId: reportId,
@@ -1032,7 +1116,6 @@ class _TimelineScreenState extends State<TimelineScreen> with TickerProviderStat
   }
 }
 
-// Extension to darken/lighten colors
 extension ColorExtension on Color {
   Color darken([double amount = 0.1]) {
     assert(amount >= 0 && amount <= 1);
