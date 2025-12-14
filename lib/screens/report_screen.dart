@@ -1,23 +1,23 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'dart:developer' as developer;
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'dart:io';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode;
 import 'package:justice_link_user/screens/timeline_screen.dart';
 import 'package:justice_link_user/screens/profile_screen.dart';
 import 'package:justice_link_user/screens/emergency_support_screen.dart';
 import 'package:justice_link_user/screens/emergency_service.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:device_info_plus/device_info_plus.dart'; // Added for device ID
+import 'package:device_info_plus/device_info_plus.dart';
 
-// Conditional import for classifier
-import 'package:justice_link_user/screens/text_classifier.dart'
-if (dart.library.html) 'package:justice_link_user/screens/text_classifier_web.dart';
+// Import the text classifier
+import 'package:justice_link_user/screens/text_classifier.dart';
 
 class ReportScreen extends StatefulWidget {
   const ReportScreen({super.key});
@@ -53,7 +53,7 @@ class _ReportScreenState extends State<ReportScreen>
   late TextClassifier _textClassifier;
   bool _classifierInitialized = false;
   Map<String, dynamic>? _prediction;
-  String _deviceId = 'unknown_device'; // Added for device tracking
+  String _deviceId = 'unknown_device';
 
   @override
   void initState() {
@@ -62,10 +62,9 @@ class _ReportScreenState extends State<ReportScreen>
     _initAnimations();
     _requestLocationPermission();
     _initializeClassifier();
-    _getDeviceId(); // Added to initialize device ID
+    _getDeviceId();
   }
 
-  // Added new method for device ID
   Future<void> _getDeviceId() async {
     try {
       final DeviceInfoPlugin deviceInfo = DeviceInfoPlugin();
@@ -81,8 +80,9 @@ class _ReportScreenState extends State<ReportScreen>
           _deviceId = 'ios_${iosInfo.identifierForVendor}';
         }
       }
+      developer.log("Device ID set: $_deviceId");
     } catch (e) {
-      debugPrint('Error getting device ID: $e');
+      developer.log('Error getting device ID: $e');
       _deviceId = 'error_${DateTime.now().millisecondsSinceEpoch}';
     }
     if (mounted) setState(() {});
@@ -101,13 +101,24 @@ class _ReportScreenState extends State<ReportScreen>
 
   Future<void> _initializeClassifier() async {
     try {
+      developer.log("Initializing text classifier...");
       _textClassifier = TextClassifier();
       await _textClassifier.initialize();
+
+      // Test the classifier
+      final testResult = await _textClassifier.classify("There is a dangerous attack happening now with guns!");
+      developer.log("Classifier test result: ${testResult['label']} (${testResult['confidence']})");
+
       setState(() {
         _classifierInitialized = true;
       });
+      developer.log("Classifier initialized successfully");
     } catch (e) {
-      debugPrint("Error initializing classifier: $e");
+      developer.log("Error initializing classifier: $e");
+      // Even if initialization fails, we'll still try to use it
+      setState(() {
+        _classifierInitialized = true;
+      });
     }
   }
 
@@ -158,20 +169,24 @@ class _ReportScreenState extends State<ReportScreen>
   }
 
   Future<void> _requestLocationPermission() async {
+    developer.log("Requesting location permission...");
     final status = await Permission.location.request();
     if (status.isGranted) {
+      developer.log("Location permission granted");
       _getCurrentLocation();
     } else {
       setState(() {
         _locationError = true;
         _locationLoading = false;
       });
+      developer.log("Location permission denied");
       _showError('Location permission denied');
     }
   }
 
   Future<void> _getCurrentLocation() async {
     setState(() => _locationLoading = true);
+    developer.log("Getting current location...");
 
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
@@ -180,6 +195,7 @@ class _ReportScreenState extends State<ReportScreen>
           _locationError = true;
           _locationLoading = false;
         });
+        developer.log("Location services disabled");
         _showError('Please enable location services');
         return;
       }
@@ -193,12 +209,16 @@ class _ReportScreenState extends State<ReportScreen>
         _locationError = false;
         _locationLoading = false;
       });
+
+      developer.log("Location acquired: ${_currentLocation!.latitude}, ${_currentLocation!.longitude}");
+
     } catch (e) {
       setState(() {
         _locationError = true;
         _locationLoading = false;
       });
-      _showError('Error getting location: $e');
+      developer.log("Error getting location: $e");
+      _showError('Error getting location');
     }
   }
 
@@ -217,6 +237,8 @@ class _ReportScreenState extends State<ReportScreen>
         _locationError = false;
       });
 
+      developer.log("Location updated: ${_currentLocation!.latitude}, ${_currentLocation!.longitude}");
+
       if (_isLocationSharing) {
         _emergencyService.updateEmergencyLocation(
           _currentLocation!,
@@ -226,13 +248,14 @@ class _ReportScreenState extends State<ReportScreen>
     }, onError: (e) {
       if (!mounted) return;
       setState(() => _locationError = true);
-      _showError('Location update error: $e');
+      developer.log("Location update error: $e");
     });
   }
 
   void _stopLocationUpdates() {
     _positionStream?.cancel();
     _positionStream = null;
+    developer.log("Location updates stopped");
   }
 
   void _stopLocationSharing() {
@@ -242,6 +265,7 @@ class _ReportScreenState extends State<ReportScreen>
     });
     _emergencyService.endEmergency(_supabase.auth.currentUser?.id ?? '');
     _showInfo('Location sharing stopped');
+    developer.log("Location sharing stopped");
   }
 
   void _startHold() {
@@ -279,9 +303,11 @@ class _ReportScreenState extends State<ReportScreen>
   }
 
   void _onTapAndHoldCompleted() async {
+    developer.log("Emergency hold completed");
     await _getCurrentLocation();
 
     if (_locationError || _currentLocation == null) {
+      developer.log("Cannot start emergency - location error");
       _showError('Cannot start emergency without location');
       return;
     }
@@ -294,12 +320,17 @@ class _ReportScreenState extends State<ReportScreen>
 
     _startLocationUpdates();
 
-    await _emergencyService.sendEmergencyAlert(
-      _currentLocation!,
-      _supabase.auth.currentUser?.id ?? '',
-    );
-
-    _showSuccess('Emergency alert sent! Sharing your location...');
+    try {
+      await _emergencyService.sendEmergencyAlert(
+        _currentLocation!,
+        _supabase.auth.currentUser?.id ?? '',
+      );
+      developer.log("Emergency alert sent successfully");
+      _showSuccess('Emergency alert sent! Sharing your location...');
+    } catch (e) {
+      developer.log("Error sending emergency alert: $e");
+      _showError('Failed to send emergency alert');
+    }
   }
 
   Future<void> _pickImageFromCamera() async {
@@ -309,9 +340,12 @@ class _ReportScreenState extends State<ReportScreen>
         setState(() {
           _images.add(image);
         });
+        developer.log("Image captured: ${image.name}");
+        _showSuccess('Photo added');
       }
     } catch (e) {
-      _showError('Error taking photo: $e');
+      developer.log("Error taking photo: $e");
+      _showError('Error taking photo');
     }
   }
 
@@ -322,9 +356,12 @@ class _ReportScreenState extends State<ReportScreen>
         setState(() {
           _images.addAll(images);
         });
+        developer.log("${images.length} images selected from gallery");
+        _showSuccess('${images.length} photos added');
       }
     } catch (e) {
-      _showError('Error selecting images: $e');
+      developer.log("Error selecting images: $e");
+      _showError('Error selecting images');
     }
   }
 
@@ -333,6 +370,8 @@ class _ReportScreenState extends State<ReportScreen>
     setState(() {
       _images.removeAt(index);
     });
+    developer.log("Image removed at index $index");
+    _showInfo('Photo removed');
   }
 
   void _updateRecordingTime() {
@@ -349,23 +388,31 @@ class _ReportScreenState extends State<ReportScreen>
 
   Future<void> _toggleRecording() async {
     if (_isRecording) {
+      developer.log("Stopping recording...");
       final dir = await getTemporaryDirectory();
       final fileName = 'recording_${DateTime.now().millisecondsSinceEpoch}.aac';
       final filePath = path.join(dir.path, fileName);
 
-      final file = File(filePath)..createSync();
+      try {
+        final file = File(filePath)..createSync();
 
-      if (mounted) {
-        setState(() {
-          _isRecording = false;
-          _audioFile = XFile(filePath);
-          _recordingTime = '00:00';
-          _recordingStartTime = null;
-        });
+        if (mounted) {
+          setState(() {
+            _isRecording = false;
+            _audioFile = XFile(filePath);
+            _recordingTime = '00:00';
+            _recordingStartTime = null;
+          });
+        }
+
+        developer.log("Recording saved: $filePath");
+        _showSuccess('Recording saved');
+      } catch (e) {
+        developer.log("Error saving recording: $e");
+        _showError('Error saving recording');
       }
-
-      _showSuccess('Recording saved');
     } else {
+      developer.log("Starting recording...");
       if (mounted) {
         setState(() {
           _isRecording = true;
@@ -391,21 +438,50 @@ class _ReportScreenState extends State<ReportScreen>
     if (!mounted) return;
     setState(() => _isUploading = true);
 
+    developer.log("Starting report submission...");
+
     try {
+      // Classify the report text
+      developer.log("Classifying text...");
       _prediction = await _textClassifier.classify(_reportController.text);
       _predictionConfidence = _prediction?['confidence'];
       final isDangerous = _prediction?['label'] == 'dangerous';
 
-      final imageUrls = await Future.wait(
-        _images.map((image) => _uploadFile(image, 'images')).toList(),
-      );
+      developer.log("Classification result: ${_prediction?['label']} (${_prediction?['confidence']})");
 
+      // Upload images
+      List<String> imageUrls = [];
+      if (_images.isNotEmpty) {
+        developer.log("Uploading ${_images.length} images...");
+        for (int i = 0; i < _images.length; i++) {
+          try {
+            final url = await _uploadFile(_images[i], 'images');
+            imageUrls.add(url);
+            developer.log("Image $i uploaded: $url");
+          } catch (e) {
+            developer.log("Error uploading image $i: $e");
+          }
+        }
+      }
+
+      // Upload audio
       String? audioUrl;
       if (_audioFile != null) {
-        audioUrl = await _uploadFile(_audioFile!, 'audio');
+        developer.log("Uploading audio...");
+        try {
+          audioUrl = await _uploadFile(_audioFile!, 'audio');
+          developer.log("Audio uploaded: $audioUrl");
+        } catch (e) {
+          developer.log("Error uploading audio: $e");
+        }
       }
 
       final location = 'POINT(${_currentLocation!.longitude} ${_currentLocation!.latitude})';
+      final userId = _supabase.auth.currentUser?.id ?? 'anonymous';
+
+      developer.log("Submitting report to database...");
+      developer.log("User ID: $userId");
+      developer.log("Location: $location");
 
       await _supabase.from('reports').insert({
         'description': _reportController.text,
@@ -414,26 +490,30 @@ class _ReportScreenState extends State<ReportScreen>
         'audio_url': audioUrl,
         'is_emergency': _isLocationSharing && !isDangerous,
         'created_at': DateTime.now().toIso8601String(),
-        'user_id': _supabase.auth.currentUser?.id,
+        'user_id': userId,
         'votes': {'dangerous': 0, 'suspicious': 0, 'normal': 0, 'fake': 0},
         'user_votes': {},
         'predicted_label': _prediction?['label'],
         'predicted_confidence': _predictionConfidence,
         'risk_score': _calculateRiskScore(isDangerous),
-        'device_id': _deviceId, // Added device ID to report
+        'device_id': _deviceId,
       });
 
       if (isDangerous) {
+        developer.log("Dangerous situation detected!");
         if (_isLocationSharing) {
           _stopLocationSharing();
         }
         _showInfo('Dangerous situation detected! Report submitted with high priority');
       }
 
+      developer.log("Report submitted successfully!");
       _showSuccess('Report submitted successfully!');
       _resetForm();
+
     } catch (e) {
-      _showError('Failed to submit report: $e');
+      developer.log("Failed to submit report: $e");
+      _showError('Failed to submit report');
     } finally {
       if (mounted) {
         setState(() => _isUploading = false);
@@ -444,22 +524,21 @@ class _ReportScreenState extends State<ReportScreen>
   double _calculateRiskScore(bool isDangerous) {
     double score = 0;
 
-    // Adjusted weights
     switch (_prediction?['label']) {
       case 'dangerous':
-        score = 80 + ((_predictionConfidence ?? 0) * 30); // 70-100 range
+        score = 80 + ((_predictionConfidence ?? 0) * 30);
         break;
       case 'suspicious':
-        score = 25 + ((_predictionConfidence ?? 0) * 25); // 30-70 range
+        score = 25 + ((_predictionConfidence ?? 0) * 25);
         break;
       case 'fake':
-        score = 5 + ((_predictionConfidence ?? 0) * 5); // 10-20 range
+        score = 5 + ((_predictionConfidence ?? 0) * 5);
         break;
-      default: // normal
-        score = 15 + ((_predictionConfidence ?? 0) * 15); // 20-40 range
+      default:
+        score = 15 + ((_predictionConfidence ?? 0) * 15);
     }
 
-    if (_isLocationSharing) score += 15; // Smaller bonus for emergencies
+    if (_isLocationSharing) score += 15;
 
     return score.clamp(0, 100).toDouble();
   }
@@ -469,6 +548,8 @@ class _ReportScreenState extends State<ReportScreen>
       final fileExt = path.extension(file.name);
       final fileName = '${DateTime.now().millisecondsSinceEpoch}$fileExt';
       final filePath = '$folder/$fileName';
+
+      developer.log("Uploading file to: $filePath");
 
       if (kIsWeb) {
         final bytes = await file.readAsBytes();
@@ -481,8 +562,10 @@ class _ReportScreenState extends State<ReportScreen>
             .upload(filePath, File(file.path), fileOptions: const FileOptions(upsert: true));
       }
 
-      return _supabase.storage.from('reports').getPublicUrl(filePath);
+      final url = _supabase.storage.from('reports').getPublicUrl(filePath);
+      return url;
     } catch (e) {
+      developer.log("Failed to upload file: $e");
       throw Exception('Failed to upload file: $e');
     }
   }
@@ -500,10 +583,12 @@ class _ReportScreenState extends State<ReportScreen>
         _predictionConfidence = null;
       });
     }
+    developer.log("Form reset");
   }
 
   void _showError(String message) {
     if (!mounted) return;
+    developer.log("Error: $message");
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -518,6 +603,7 @@ class _ReportScreenState extends State<ReportScreen>
 
   void _showSuccess(String message) {
     if (!mounted) return;
+    developer.log("Success: $message");
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -532,6 +618,7 @@ class _ReportScreenState extends State<ReportScreen>
 
   void _showInfo(String message) {
     if (!mounted) return;
+    developer.log("Info: $message");
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -1144,6 +1231,31 @@ class _ReportScreenState extends State<ReportScreen>
                 );
               },
             ),
+            // Debug section (only in development)
+            if (!kReleaseMode)
+              Column(
+                children: [
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: () {
+                      developer.log("=== DEBUG INFO ===");
+                      developer.log("Classifier initialized: $_classifierInitialized");
+                      developer.log("Location: $_currentLocation");
+                      developer.log("Location error: $_locationError");
+                      developer.log("Location loading: $_locationLoading");
+                      developer.log("Location sharing: $_isLocationSharing");
+                      developer.log("Images: ${_images.length}");
+                      developer.log("Audio: ${_audioFile != null}");
+                      developer.log("Report text: ${_reportController.text}");
+                      _showInfo("Debug info logged to console");
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.grey[800],
+                    ),
+                    child: const Text("DEBUG INFO"),
+                  ),
+                ],
+              ),
           ],
         ),
       ),

@@ -3,6 +3,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' as latlng;
 import 'package:intl/intl.dart';
 import 'package:flutter_map_cancellable_tile_provider/flutter_map_cancellable_tile_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class EmergencyLocationCard extends StatefulWidget {
   final latlng.LatLng location;
@@ -216,11 +217,23 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard> {
               },
             ),
             children: [
-        TileLayer(
-        urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        userAgentPackageName: 'com.example.app',
-        tileProvider: CancellableNetworkTileProvider(),
-      ),
+              // Use a tile server that works with mobile apps
+              TileLayer(
+                urlTemplate: 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png',
+                subdomains: const ['a', 'b', 'c'],
+                userAgentPackageName: 'com.example.justice_link_user',
+                tileProvider: CancellableNetworkTileProvider(),
+              ),
+
+              // REQUIRED: Attribution for OpenStreetMap
+              RichAttributionWidget(
+                attributions: [
+                  TextSourceAttribution(
+                    'OpenStreetMap contributors',
+                    onTap: () => _launchUrl('https://openstreetmap.org/copyright'),
+                  ),
+                ],
+              ),
 
               if (routePoints.isNotEmpty && !widget.isOwnEmergency)
                 PolylineLayer(
@@ -260,7 +273,11 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard> {
             ],
           ),
           if (isRouting)
-            const Center(child: CircularProgressIndicator()),
+            const Center(
+              child: CircularProgressIndicator(
+                color: Colors.white,
+              ),
+            ),
           if (routingError.isNotEmpty && !widget.isOwnEmergency)
             Positioned(
               bottom: 10,
@@ -280,5 +297,15 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard> {
         ],
       ),
     );
+  }
+
+  Future<void> _launchUrl(String urlString) async {
+    final url = Uri.parse(urlString);
+    if (await canLaunchUrl(url)) {
+      await launchUrl(
+        url,
+        mode: LaunchMode.externalApplication,
+      );
+    }
   }
 }
