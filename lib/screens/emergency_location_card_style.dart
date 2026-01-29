@@ -1,12 +1,16 @@
+import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart' as latlng;
+import 'package:latlong2/latlong.dart';
 import 'package:intl/intl.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:flutter_map_cancellable_tile_provider/flutter_map_cancellable_tile_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:dio/dio.dart'; // lightweight HTTP client
 
 class EmergencyLocationCard extends StatefulWidget {
-  final latlng.LatLng location;
+  final LatLng callerLocation; // emergency caller position
   final DateTime timestamp;
   final String userId;
   final VoidCallback onRespond;
@@ -14,7 +18,7 @@ class EmergencyLocationCard extends StatefulWidget {
 
   const EmergencyLocationCard({
     super.key,
-    required this.location,
+    required this.callerLocation,
     required this.timestamp,
     required this.userId,
     required this.onRespond,
@@ -26,105 +30,138 @@ class EmergencyLocationCard extends StatefulWidget {
 }
 
 class _EmergencyLocationCardState extends State<EmergencyLocationCard> {
-  late final MapController mapController;
-  double? distance;
-  latlng.LatLng? currentPosition;
-  bool isMapReady = false;
-  List<latlng.LatLng> routePoints = [];
-  bool isRouting = false;
-  String routingError = '';
+  /* ------------- STATE ------------- */
+  late final MapController _mapController;
+  StreamSubscription<Position>? _positionStream;
+  LatLng? _myPosition; // live responder position
+  List<LatLng> _routePoints = [];
+  double? _distance; // metres
+  String? _eta; // human readable
+  bool _isRouting = false;
+  String _routingError = '';
+  bool _mapReady = false;
 
+  final Distance _distanceCalc = const Distance();
+  final Dio _dio = Dio();
+
+  /* ------------- LIFE-CYCLE ------------- */
   @override
   void initState() {
     super.initState();
-    mapController = MapController();
-    _initializeLocation();
+    _mapController = MapController();
+    _startLocationStream();
   }
 
   @override
   void dispose() {
-    mapController.dispose();
+    _positionStream?.cancel();
     super.dispose();
   }
 
-  Future<void> _initializeLocation() async {
-    // Hardcoded current position (green marker)
-    final hardcodedCurrentPosition = latlng.LatLng(
-      widget.location.latitude + 0.00001, // Approximately 1 meters north
-      widget.location.longitude,
+  /* ------------- LOCATION STREAM ------------- */
+  Future<void> _startLocationStream() async {
+    bool service = await Geolocator.isLocationServiceEnabled();
+    if (!service) return;
+
+    LocationPermission p = await Geolocator.checkPermission();
+    if (p == LocationPermission.denied) p = await Geolocator.requestPermission();
+    if (p == LocationPermission.deniedForever) return;
+
+    const settings = LocationSettings(
+      accuracy: LocationAccuracy.best,
+      distanceFilter: 10, // refresh every 10 m moved
     );
 
-    // Hardcoded distance calculation (0.1 meters)
-    final hardcodedDistance = 1.0;
-
-    setState(() {
-      currentPosition = hardcodedCurrentPosition;
-      distance = hardcodedDistance;
+    _positionStream = Geolocator.getPositionStream(locationSettings: settings)
+        .listen((Position pos) {
+      if (!mounted) return;
+      final newPos = LatLng(pos.latitude, pos.longitude);
+      setState(() => _myPosition = newPos);
+      _updateRouteAndMetadata();
+      _updateCamera();
     });
-
-    if (!widget.isOwnEmergency) {
-      _getRoute(hardcodedCurrentPosition, widget.location);
-    }
-
-    if (isMapReady) _updateMapView();
   }
 
-  Future<void> _getRoute(latlng.LatLng start, latlng.LatLng end) async {
-    try {
-      setState(() {
-        isRouting = true;
-        routingError = '';
-      });
+  /* ------------- ROUTING & METADATA ------------- */
+  Future<void> _updateRouteAndMetadata() async {
+    if (_myPosition == null) return;
 
-      // Create a simple straight line route for demo purposes
-      final points = [start, end];
-
-      setState(() {
-        routePoints = points;
-        isRouting = false;
-      });
-    } catch (e) {
-      setState(() {
-        routingError = 'Routing failed';
-        isRouting = false;
-      });
-    }
-  }
-
-  void _updateMapView() {
-    if (currentPosition == null) return;
-
-    final points = [
-      widget.location,
-      currentPosition!,
-    ];
+    setState(() => _isRouting = true);
 
     try {
-      final bounds = LatLngBounds.fromPoints(points);
-      mapController.fitCamera(
-        CameraFit.bounds(
-          bounds: bounds,
-          padding: const EdgeInsets.all(50),
-        ),
-      );
+      // OSRM demo server – free, no key needed
+      final url =
+          'http://router.project-osrm.org/route/v1/driving/'
+          '${_myPosition!.longitude},${_myPosition!.latitude};'
+          '${widget.callerLocation.longitude},${widget.callerLocation.latitude}'
+          '?overview=full&geometries=geojson';
+
+      final res = await _dio.get(url);
+      final geometry = res.data['routes'][0]['geometry'] as String;
+      final distanceM = res.data['routes'][0]['distance'] as double; // metres
+      final durationS = res.data['routes'][0]['duration'] as double; // seconds
+
+      final points = _decodePolyline(geometry);
+
+      setState(() {
+        _routePoints = points;
+        _distance = distanceM;
+        _eta = _formatETA(durationS);
+        _routingError = '';
+        _isRouting = false;
+      });
     } catch (e) {
-      final center = latlng.LatLng(
-        (widget.location.latitude + currentPosition!.latitude) / 2,
-        (widget.location.longitude + currentPosition!.longitude) / 2,
-      );
-      mapController.move(center, 15);
+      // fallback: straight line + crow-fly distance
+      final straight = <LatLng>[_myPosition!, widget.callerLocation];
+      setState(() {
+        _routePoints = straight;
+        _distance = _distanceCalc.as(LengthUnit.Meter, _myPosition!, widget.callerLocation);
+        _eta = null;
+        _routingError = 'Routing unavailable';
+        _isRouting = false;
+      });
     }
   }
 
+  /* ------------- CAMERA ------------- */
+  void _updateCamera() {
+    if (!_mapReady || _myPosition == null) return;
+
+    final bounds = LatLngBounds.fromPoints([_myPosition!, widget.callerLocation]);
+    _mapController.fitCamera(
+      CameraFit.bounds(
+        bounds: bounds,
+        padding: const EdgeInsets.all(50),
+      ),
+    );
+  }
+
+  /* ------------- HELPERS ------------- */
+  // GeoJSON → LatLng list
+  List<LatLng> _decodePolyline(String geoJson) {
+    // OSRM returns GeoJSON LineString
+    final coords = (geoJson.split(';').first.split(',').map(double.parse).toList());
+    final List<LatLng> list = [];
+    for (int i = 0; i < coords.length; i += 2) {
+      list.add(LatLng(coords[i + 1], coords[i])); // lat, lon
+    }
+    return list;
+  }
+
+  String _formatETA(double seconds) {
+    if (seconds < 60) return '${seconds.round()} s';
+    final min = (seconds / 60).round();
+    return '$min min';
+  }
+
+  /* ------------- UI ------------- */
   @override
   Widget build(BuildContext context) {
     return AbsorbPointer(
-      absorbing: isRouting,
+      absorbing: _isRouting,
       child: Card(
         margin: const EdgeInsets.only(bottom: 16),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         color: Colors.red.withOpacity(0.2),
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -141,11 +178,13 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard> {
               ),
               const SizedBox(height: 12),
 
-              if (distance != null)
+              // Live distance + ETA
+              if (_distance != null)
                 Text(
                   widget.isOwnEmergency
                       ? 'You are at this location'
-                      : 'Distance: ${distance!.toStringAsFixed(2)} meters',
+                      : 'Distance: ${_distance!.toStringAsFixed(0)} m'
+                      '${_eta == null ? '' : '  •  ETA: $_eta'}',
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 16,
@@ -154,25 +193,26 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard> {
                 ),
               const SizedBox(height: 8),
 
+              // Map
               SizedBox(
                 height: 200,
                 child: _buildMapSection(),
               ),
               const SizedBox(height: 12),
 
+              // Coordinates
               Text(
-                'Location: ${widget.location.latitude.toStringAsFixed(5)}, '
-                    '${widget.location.longitude.toStringAsFixed(5)}',
-                style: const TextStyle(color: Colors.white70),
+                'Caller: ${widget.callerLocation.latitude.toStringAsFixed(5)}, '
+                    '${widget.callerLocation.longitude.toStringAsFixed(5)}',
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
               ),
-              const SizedBox(height: 4),
-
               Text(
-                'Reported: ${DateFormat('MMM dd, yyyy - hh:mm a').format(widget.timestamp)}',
-                style: const TextStyle(color: Colors.white70),
+                'Reported: ${DateFormat('MMM dd, yyyy – hh:mm a').format(widget.timestamp)}',
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
               ),
               const SizedBox(height: 12),
 
+              // Respond button (only for responders)
               if (!widget.isOwnEmergency)
                 SizedBox(
                   width: double.infinity,
@@ -205,27 +245,22 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard> {
       child: Stack(
         children: [
           FlutterMap(
-            mapController: mapController,
+            mapController: _mapController,
             options: MapOptions(
-              initialCenter: currentPosition ?? widget.location,
-              initialZoom: 15.0,
+              initialCenter: widget.callerLocation,
+              initialZoom: 15,
               onMapReady: () {
-                setState(() => isMapReady = true);
-                if (currentPosition != null) {
-                  _updateMapView();
-                }
+                _mapReady = true;
+                if (_myPosition != null) _updateCamera();
               },
             ),
             children: [
-              // Use a tile server that works with mobile apps
               TileLayer(
                 urlTemplate: 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png',
                 subdomains: const ['a', 'b', 'c'],
-                userAgentPackageName: 'com.example.justice_link_user',
+                userAgentPackageName: 'com.justicelink.user',
                 tileProvider: CancellableNetworkTileProvider(),
               ),
-
-              // REQUIRED: Attribution for OpenStreetMap
               RichAttributionWidget(
                 attributions: [
                   TextSourceAttribution(
@@ -234,36 +269,37 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard> {
                   ),
                 ],
               ),
-
-              if (routePoints.isNotEmpty && !widget.isOwnEmergency)
+              if (_routePoints.isNotEmpty && !widget.isOwnEmergency)
                 PolylineLayer(
                   polylines: [
                     Polyline(
-                      points: routePoints,
-                      color: Colors.blue.withOpacity(0.7),
-                      strokeWidth: 4,
+                      points: _routePoints,
+                      color: Colors.blue.withOpacity(0.8),
+                      strokeWidth: 5,
                     ),
                   ],
                 ),
               MarkerLayer(
                 markers: [
+                  // Caller (RED)
                   Marker(
                     width: 40,
                     height: 40,
-                    point: widget.location,
+                    point: widget.callerLocation,
                     child: const Icon(
                       Icons.location_pin,
                       color: Colors.red,
                       size: 40,
                     ),
                   ),
-                  if (currentPosition != null)
+                  // Responder (GREEN) – only if we have a fix
+                  if (_myPosition != null)
                     Marker(
                       width: 40,
                       height: 40,
-                      point: currentPosition!,
+                      point: _myPosition!,
                       child: Icon(
-                        Icons.location_pin,
+                        Icons.navigation,
                         color: widget.isOwnEmergency ? Colors.red : Colors.green,
                         size: 40,
                       ),
@@ -272,25 +308,23 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard> {
               ),
             ],
           ),
-          if (isRouting)
+          if (_isRouting)
             const Center(
-              child: CircularProgressIndicator(
-                color: Colors.white,
-              ),
+              child: CircularProgressIndicator(color: Colors.white),
             ),
-          if (routingError.isNotEmpty && !widget.isOwnEmergency)
+          if (_routingError.isNotEmpty && !widget.isOwnEmergency)
             Positioned(
               bottom: 10,
               left: 10,
               child: Container(
-                padding: const EdgeInsets.all(8),
+                padding: const EdgeInsets.all(6),
                 decoration: BoxDecoration(
                   color: Colors.black.withOpacity(0.7),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
-                  routingError,
-                  style: const TextStyle(color: Colors.orange),
+                  _routingError,
+                  style: const TextStyle(color: Colors.orange, fontSize: 12),
                 ),
               ),
             ),
@@ -299,13 +333,8 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard> {
     );
   }
 
-  Future<void> _launchUrl(String urlString) async {
-    final url = Uri.parse(urlString);
-    if (await canLaunchUrl(url)) {
-      await launchUrl(
-        url,
-        mode: LaunchMode.externalApplication,
-      );
-    }
+  Future<void> _launchUrl(String url) async {
+    final uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 }

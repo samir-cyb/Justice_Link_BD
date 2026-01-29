@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:justice_link_user/screens/about_app_screen.dart';
+import 'package:justice_link_user/screens/police_info_screen.dart';
 import 'package:provider/provider.dart';
 import 'package:justice_link_user/screens/login_screen.dart';
 import 'package:justice_link_user/screens/signup_screen.dart';
@@ -35,6 +37,7 @@ class MyApp extends StatelessWidget {
         title: 'Justice Link BD',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
+          fontFamily: 'Roboto',
           colorScheme: ColorScheme.fromSeed(
             seedColor: const Color(0xFF6C63FF),
             brightness: Brightness.dark,
@@ -46,6 +49,8 @@ class MyApp extends StatelessWidget {
           '/login': (context) => const LoginScreen(),
           '/signup': (context) => const SignupScreen(),
           '/report': (context) => const ReportScreen(),
+          '/about': (context) => const AboutAppScreen(), // Add this
+          '/police-info': (context) => const PoliceInfoScreen(),
         },
       ),
     );

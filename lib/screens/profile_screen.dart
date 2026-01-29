@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:justice_link_user/services/auth_service.dart';
 import 'package:justice_link_user/models/user_model.dart';
+import 'package:justice_link_user/screens/about_app_screen.dart';
+import 'package:justice_link_user/screens/police_info_screen.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -228,11 +230,14 @@ class ProfileScreen extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
-              // Additional action buttons
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              const SizedBox(height: 24),
+              // Additional action buttons - UPDATED
+              Wrap(
+                spacing: 30,
+                runSpacing: 20,
+                alignment: WrapAlignment.center,
                 children: [
+                  // Settings button
                   TextButton(
                     onPressed: () {
                       // Navigate to settings
@@ -260,9 +265,16 @@ class ProfileScreen extends StatelessWidget {
                       ],
                     ),
                   ),
+
+                  // About This App button
                   TextButton(
                     onPressed: () {
-                      // Navigate to help
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const AboutAppScreen(),
+                        ),
+                      );
                     },
                     style: TextButton.styleFrom(
                       foregroundColor: Colors.white,
@@ -275,11 +287,46 @@ class ProfileScreen extends StatelessWidget {
                             shape: BoxShape.circle,
                           ),
                           padding: const EdgeInsets.all(12),
-                          child: const Icon(Icons.help_outline, size: 24),
+                          child: const Icon(Icons.info_outline, size: 24),
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Help',
+                          'About This App',
+                          style: TextStyle(
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // Local Police Information button
+                  TextButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const PoliceInfoScreen(),
+                        ),
+                      );
+                    },
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.white,
+                    ),
+                    child: Column(
+                      children: [
+                        Container(
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.1),
+                            shape: BoxShape.circle,
+                          ),
+                          padding: const EdgeInsets.all(12),
+                          child: const Icon(Icons.local_police, size: 24),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Police\nInformation',
+                          textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Colors.white70,
                           ),

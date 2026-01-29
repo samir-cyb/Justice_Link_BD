@@ -1,5 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -9,12 +12,25 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+
+    <!-- Optional: For high priority alarms -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
     <application
-        android:label="justice_link_user"
+        android:label="Justice Link"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:allowBackup="true"
+        android:theme="@style/LaunchTheme"
+        android:usesCleartextTraffic="true"
         tools:replace="android:label">
+
+        <!-- Main Activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -24,58 +40,112 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
+
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
-                android:resource="@style/NormalTheme"
-                />
+                android:resource="@style/NormalTheme" />
+
+            <!-- Launcher Intent -->
             <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.LAUNCHER"/>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Add this intent filter for notification clicks -->
+            <!-- Notification Click Intent -->
             <intent-filter>
                 <action android:name="FLUTTER_NOTIFICATION_CLICK" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+
+            <!-- Deep Link Intent for emergency notifications -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="emergency" />
+            </intent-filter>
         </activity>
 
-        <!-- Add this service for foreground notifications -->
+        <!-- Full-Screen Intent Activity for Emergency Notifications -->
+        <!-- This activity will show when screen is off/locked -->
+        <activity
+            android:name="com.dexterous.flutterlocalnotifications.FullScreenIntentNotificationLaunchActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:exported="true"
+            android:showOnLockScreen="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+            </intent-filter>
+        </activity>
+
+        <!-- Notification Service -->
         <service
             android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationService"
             android:permission="android.permission.BIND_JOB_SERVICE"
             android:exported="false" />
 
-        <!-- FIXED: Add android:exported attribute -->
-        <!-- Add this receiver for boot completed events -->
+        <!-- Notification Boot Receiver -->
         <receiver
             android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"
             android:exported="false">
+
             <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED"/>
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
-                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
-                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 
-        <!-- Add this meta-data for notification channels -->
+        <!-- Notification Receiver -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"
+            android:exported="false" />
+
+        <!-- Alarm Receiver for Emergency Alerts -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.AlarmReceiver"
+            android:exported="false" />
+
+        <!-- High Priority Notification Channel Metadata -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="emergency_channel" />
+            android:value="emergency_channel_high" />
 
-        <!-- Don't delete the meta-data below.
-             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <!-- Flutter Embedding Metadata -->
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- Optional: If using Firebase Cloud Messaging -->
+        <!--
+        <service
+            android:name=".MyFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification" />
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/red" />
+        -->
     </application>
 
-    <!-- Required to query activities that can process text -->
+    <!-- Queries for text processing -->
     <queries>
         <intent>
-            <action android:name="android.intent.action.PROCESS_TEXT"/>
-            <data android:mimeType="text/plain"/>
+            <action android:name="android.intent.action.PROCESS_TEXT" />
+            <data android:mimeType="text/plain" />
         </intent>
     </queries>
 </manifest>
