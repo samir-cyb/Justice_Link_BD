@@ -51,6 +51,9 @@ dependencies:
   wakelock_plus: ^1.4.0
   android_alarm_manager_plus: ^5.0.0
   dio: ^5.9.1
+  timeago: ^3.7.1
+  shared_preferences: ^2.5.4
+  jwt_decoder: ^2.0.1
 
 
 

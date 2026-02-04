@@ -65,6 +65,9 @@ class _TimelineScreenState extends State<TimelineScreen>
 
   StreamSubscription<List<Map<String, dynamic>>>? _reportsSubscription;
 
+  // NEW: Sorting mode - 'priority' (default) or 'time'
+  String _sortMode = 'priority';
+
   @override
   void initState() {
     super.initState();
@@ -98,8 +101,6 @@ class _TimelineScreenState extends State<TimelineScreen>
     _reportsSubscription = _supabase
         .from('reports')
         .stream(primaryKey: ['id'])
-        .order('created_at', ascending: false)
-        .limit(100)
         .listen((List<Map<String, dynamic>> reports) {
       if (mounted) {
         _updateReportsList(reports);
@@ -113,9 +114,82 @@ class _TimelineScreenState extends State<TimelineScreen>
     });
   }
 
+  // NEW: Calculate priority score for sorting
+  double _calculatePriorityScore(Map<String, dynamic> report) {
+    final now = DateTime.now();
+    final createdAt = (report['created_at'] as String?)?.isNotEmpty == true
+        ? DateTime.parse(report['created_at'])
+        : now;
+    final age = now.difference(createdAt);
+
+    final votes = (report['votes'] as Map<String, dynamic>?) ??
+        {'fake': 0, 'normal': 0, 'dangerous': 0, 'suspicious': 0};
+    final riskScore = (report['risk_score'] as num?)?.toDouble() ?? 0.0;
+    final predictedLabel = report['predicted_label'] as String?;
+    final predictedConfidence = (report['predicted_confidence'] as num?)?.toDouble() ?? 0.0;
+    final isEmergency = report['is_emergency'] as bool? ?? false;
+    final isSensitive = report['is_sensitive'] as bool? ?? false;
+    final imageVerified = report['image_verified'] as bool? ?? false;
+
+    // 1. Base risk score (50% weight)
+    double baseScore = riskScore * 0.5;
+
+    // 2. Vote score (30% weight)
+    int dangerous = votes['dangerous'] as int? ?? 0;
+    int suspicious = votes['suspicious'] as int? ?? 0;
+    int normal = votes['normal'] as int? ?? 0;
+    int fake = votes['fake'] as int? ?? 0;
+    int totalVotes = dangerous + suspicious + normal + fake;
+
+    double voteScore = 0;
+    if (totalVotes > 0) {
+      double voteValue = ((dangerous * 1.0) + (suspicious * 0.5) + (normal * 0.2) + (fake * -1.0)) / totalVotes;
+      voteScore = (voteValue * 50 + 50) * 0.3;
+    }
+
+    // 3. Verification & AI bonuses (20% weight)
+    double bonusScore = 0;
+    if (imageVerified) bonusScore += 10;
+    if (predictedConfidence > 0.8) bonusScore += 5;
+    if (isSensitive) bonusScore += 5;
+    if (predictedLabel == 'dangerous') bonusScore += 10;
+    bonusScore *= 0.2;
+
+    // 4. Time multiplier (Your exact rules)
+    double timeMultiplier;
+    if (age.inHours < 6) {
+      timeMultiplier = 1.0; // Pure priority
+    } else if (age.inHours < 12) {
+      timeMultiplier = 0.8;
+    } else if (age.inHours < 24) {
+      timeMultiplier = 0.5;
+    } else if (age.inHours < 36 && (riskScore > 60 || isEmergency || isSensitive || predictedLabel == 'dangerous')) {
+      timeMultiplier = 0.3; // High priority only
+    } else {
+      timeMultiplier = 0.1; // Archive
+    }
+
+    // Emergency boost
+    if (isEmergency && age.inHours < 12) {
+      timeMultiplier = 1.0;
+    }
+
+    return (baseScore + voteScore + bonusScore) * timeMultiplier;
+  }
+
   void _updateReportsList(List<Map<String, dynamic>> newReports) {
+    // NEW: Calculate priority scores and sort
+    final reportsWithScores = newReports.map((report) {
+      final score = _calculatePriorityScore(report);
+      return {...report, '_priorityScore': score};
+    }).toList();
+
+    // Sort by priority score descending
+    reportsWithScores.sort((a, b) =>
+        (b['_priorityScore'] as double).compareTo(a['_priorityScore'] as double));
+
     setState(() {
-      _reports = newReports;
+      _reports = reportsWithScores;
       _isLoading = false;
 
       for (var report in _reports) {
@@ -146,7 +220,6 @@ class _TimelineScreenState extends State<TimelineScreen>
       final response = await _supabase
           .from('reports')
           .select('*')
-          .order('created_at', ascending: false)
           .limit(100);
 
       if (!mounted) return;
@@ -195,6 +268,16 @@ class _TimelineScreenState extends State<TimelineScreen>
         return crimeType.contains(categoryName);
       }
     }).toList();
+
+    // NEW: Apply sorting based on mode
+    if (_sortMode == 'time') {
+      filteredReports.sort((a, b) {
+        final aTime = DateTime.parse(a['created_at'] as String);
+        final bTime = DateTime.parse(b['created_at'] as String);
+        return bTime.compareTo(aTime);
+      });
+    }
+    // If 'priority', already sorted from _updateReportsList
 
     return filteredReports;
   }
@@ -418,6 +501,9 @@ class _TimelineScreenState extends State<TimelineScreen>
         'user_votes': currentUserVotes,
       }).eq('id', reportId);
 
+      // NEW: Recalculate priority scores after vote
+      _updateReportsList(_reports);
+
     } catch (e) {
       debugPrint('Error updating vote: $e');
       _showSnackBar('Failed to update vote. Please try again.', Colors.red);
@@ -602,7 +688,7 @@ class _TimelineScreenState extends State<TimelineScreen>
     return 'Location: Not Specified';
   }
 
-  // UPDATED: Image preview with sensitive content blur
+  // UPDATED: Image preview with sensitive content blur - FULL SIZE
   Widget _buildImagePreview({
     required List<dynamic> images,
     required String reportId,
@@ -619,48 +705,61 @@ class _TimelineScreenState extends State<TimelineScreen>
         children: [
           ClipRRect(
             borderRadius: BorderRadius.circular(12),
-            child: Container(
-              height: 200,
+            child: CachedNetworkImage(
+              imageUrl: imageUrl,
               width: double.infinity,
-              color: Colors.grey[800],
-              child: CachedNetworkImage(
-                imageUrl: imageUrl,
-                fit: BoxFit.cover,
-                placeholder: (context, url) => Center(
-                  child: CircularProgressIndicator(
-                    color: Colors.grey[600],
+              fit: BoxFit.cover,
+              placeholder: (context, url) => AspectRatio(
+                aspectRatio: 16 / 9,
+                child: Container(
+                  color: Colors.grey[800],
+                  child: Center(
+                    child: CircularProgressIndicator(
+                      color: Colors.grey[600],
+                    ),
                   ),
                 ),
-                errorWidget: (context, url, error) => Center(
-                  child: Icon(
-                    Icons.broken_image,
-                    color: Colors.grey[600],
-                    size: 48,
-                  ),
-                ),
-                imageBuilder: (context, imageProvider) {
-                  return isSensitive
-                      ? ColorFiltered(
-                    colorFilter: ColorFilter.mode(
-                      Colors.black.withOpacity(0.7),
-                      BlendMode.srcOver,
-                    ),
-                    child: ImageFiltered(
-                      imageFilter: const ColorFilter.matrix([
-                        0.2126, 0.7152, 0.0722, 0, 0,
-                        0.2126, 0.7152, 0.0722, 0, 0,
-                        0.2126, 0.7152, 0.0722, 0, 0,
-                        0,      0,      0,      1, 0,
-                      ]),
-                      child: Image(
-                        image: imageProvider,
-                        fit: BoxFit.cover,
-                      ),
-                    ),
-                  )
-                      : Image(image: imageProvider, fit: BoxFit.cover);
-                },
               ),
+              errorWidget: (context, url, error) => AspectRatio(
+                aspectRatio: 16 / 9,
+                child: Container(
+                  color: Colors.grey[800],
+                  child: Center(
+                    child: Icon(
+                      Icons.broken_image,
+                      color: Colors.grey[600],
+                      size: 48,
+                    ),
+                  ),
+                ),
+              ),
+              imageBuilder: (context, imageProvider) {
+                return isSensitive
+                    ? ColorFiltered(
+                  colorFilter: ColorFilter.mode(
+                    Colors.black.withOpacity(0.7),
+                    BlendMode.srcOver,
+                  ),
+                  child: ImageFiltered(
+                    imageFilter: const ColorFilter.matrix([
+                      0.2126, 0.7152, 0.0722, 0, 0,
+                      0.2126, 0.7152, 0.0722, 0, 0,
+                      0.2126, 0.7152, 0.0722, 0, 0,
+                      0,      0,      0,      1, 0,
+                    ]),
+                    child: Image(
+                      image: imageProvider,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                )
+                    : Image(
+                  image: imageProvider,
+                  width: double.infinity,
+                  fit: BoxFit.cover,
+                );
+              },
             ),
           ),
 
@@ -775,10 +874,11 @@ class _TimelineScreenState extends State<TimelineScreen>
       child: Tooltip(
         message: tooltip,
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
             AnimatedContainer(
               duration: const Duration(milliseconds: 200),
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.all(6),
               decoration: BoxDecoration(
                 gradient: LinearGradient(
                   colors: [
@@ -793,9 +893,9 @@ class _TimelineScreenState extends State<TimelineScreen>
                     ? [
                   BoxShadow(
                     color: color.withOpacity(0.4),
-                    blurRadius: 10,
-                    spreadRadius: 2,
-                    offset: const Offset(0, 4),
+                    blurRadius: 8,
+                    spreadRadius: 1,
+                    offset: const Offset(0, 2),
                   ),
                 ]
                     : [],
@@ -803,9 +903,11 @@ class _TimelineScreenState extends State<TimelineScreen>
               child: Transform.scale(
                 scale: isSelected ? 1.1 : 1.0,
                 child: IconButton(
-                  icon: Icon(icon, color: isSelected ? color : Colors.white70, size: 24),
+                  icon: Icon(icon, color: isSelected ? color : Colors.white70, size: 20),
                   onPressed: onPressed,
-                  splashRadius: 24,
+                  splashRadius: 20,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                   style: IconButton.styleFrom(
                     backgroundColor: Colors.transparent,
                   ),
@@ -822,7 +924,7 @@ class _TimelineScreenState extends State<TimelineScreen>
                 key: ValueKey<int>(count),
                 style: TextStyle(
                   color: isSelected ? color : Colors.white70,
-                  fontSize: 14,
+                  fontSize: 11,
                   fontWeight: FontWeight.bold,
                 ),
               ),
@@ -847,31 +949,26 @@ class _TimelineScreenState extends State<TimelineScreen>
     }
   }
 
+  // COMPACT: Main tab bar with reduced height
   Widget _buildMainTabBar() {
     return Container(
+      height: 50,
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            Colors.grey[900]!,
-            Colors.grey[850]!,
-          ],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-        ),
+        color: Colors.grey[900],
         border: Border(
           bottom: BorderSide(color: Colors.grey[800]!, width: 1),
         ),
       ),
       child: Row(
         children: [
-          _buildMainTabButton('OFFLINE', 0),
-          _buildMainTabButton('ONLINE', 1),
+          _buildMainTabButton('OFFLINE', 0, Icons.location_on),
+          _buildMainTabButton('ONLINE', 1, Icons.wifi),
         ],
       ),
     );
   }
 
-  Widget _buildMainTabButton(String label, int index) {
+  Widget _buildMainTabButton(String label, int index, IconData icon) {
     final isSelected = _selectedMainTab == index;
     return Expanded(
       child: InkWell(
@@ -881,39 +978,33 @@ class _TimelineScreenState extends State<TimelineScreen>
           });
         },
         child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 16),
           decoration: BoxDecoration(
-            gradient: isSelected
-                ? LinearGradient(
-              colors: index == 0
-                  ? [Colors.red, Colors.redAccent]
-                  : [Colors.blue, Colors.blueAccent],
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-            )
-                : null,
+            color: isSelected
+                ? (index == 0 ? Colors.red.withOpacity(0.2) : Colors.blue.withOpacity(0.2))
+                : Colors.transparent,
             border: Border(
               bottom: BorderSide(
-                color: isSelected ? Colors.white : Colors.transparent,
-                width: 3,
+                color: isSelected ? (index == 0 ? Colors.red : Colors.blue) : Colors.transparent,
+                width: 2,
               ),
             ),
           ),
-          child: Column(
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(
-                index == 0 ? Icons.location_on : Icons.wifi,
+                icon,
                 color: isSelected ? Colors.white : Colors.grey[600],
-                size: 24,
+                size: 18,
               ),
-              const SizedBox(height: 4),
+              const SizedBox(width: 6),
               Text(
                 label,
                 style: TextStyle(
                   color: isSelected ? Colors.white : Colors.grey[600],
                   fontWeight: FontWeight.bold,
-                  fontSize: 14,
-                  letterSpacing: 1,
+                  fontSize: 13,
+                  letterSpacing: 0.5,
                 ),
               ),
             ],
@@ -923,7 +1014,7 @@ class _TimelineScreenState extends State<TimelineScreen>
     );
   }
 
-  // UPDATED: Category chips with better overflow handling
+  // COMPACT: Horizontal scrollable category chips
   Widget _buildCategoryChips() {
     final categories = _selectedMainTab == 0 ? _offlineCategories : _onlineCategories;
     final selectedCategory = _selectedMainTab == 0
@@ -931,27 +1022,25 @@ class _TimelineScreenState extends State<TimelineScreen>
         : _selectedOnlineCategory;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      height: 44,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            Colors.grey[850]!,
-            Colors.grey[900]!,
-          ],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
+        color: Colors.grey[850],
+        border: Border(
+          bottom: BorderSide(color: Colors.grey[800]!, width: 1),
         ),
       ),
-      child: Wrap(
-        spacing: 8.0, // Horizontal space between chips
-        runSpacing: 8.0, // Vertical space between rows
-        children: List.generate(categories.length, (index) {
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        itemCount: categories.length,
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        itemBuilder: (context, index) {
           final category = categories[index];
           final categoryColor = category['color'] as Color;
           final isSelected = selectedCategory == index;
 
-          return Container(
-            constraints: const BoxConstraints(maxWidth: 120),
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
             child: FilterChip(
               label: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -959,17 +1048,13 @@ class _TimelineScreenState extends State<TimelineScreen>
                   Icon(category['icon'] as IconData,
                       size: 14,
                       color: isSelected ? Colors.white : categoryColor),
-                  const SizedBox(width: 6),
-                  Flexible(
-                    child: Text(
-                      category['name'] as String,
-                      style: TextStyle(
-                        color: isSelected ? Colors.white : Colors.grey[400],
-                        fontWeight: FontWeight.w500,
-                        fontSize: 12,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
+                  const SizedBox(width: 4),
+                  Text(
+                    category['name'] as String,
+                    style: TextStyle(
+                      color: isSelected ? Colors.white : Colors.grey[400],
+                      fontWeight: FontWeight.w500,
+                      fontSize: 12,
                     ),
                   ),
                 ],
@@ -987,17 +1072,102 @@ class _TimelineScreenState extends State<TimelineScreen>
               selectedColor: categoryColor,
               checkmarkColor: Colors.white,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
+                borderRadius: BorderRadius.circular(16),
                 side: BorderSide(
-                  color: categoryColor.withOpacity(0.3),
+                  color: isSelected ? categoryColor : categoryColor.withOpacity(0.3),
                   width: 1,
                 ),
               ),
               backgroundColor: Colors.grey[800],
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: VisualDensity.compact,
             ),
           );
-        }),
+        },
+      ),
+    );
+  }
+
+  // COMPACT: Sort toggle in header
+  Widget _buildSortToggle() {
+    return Container(
+      height: 36,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: Colors.grey[900],
+        border: Border(
+          bottom: BorderSide(color: Colors.grey[800]!, width: 1),
+        ),
+      ),
+      child: Row(
+        children: [
+          Text(
+            'Sort:',
+            style: TextStyle(
+              color: Colors.grey[500],
+              fontSize: 12,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Row(
+              children: [
+                _buildSortChip('Priority', 'priority', Icons.trending_up, Colors.redAccent),
+                const SizedBox(width: 8),
+                _buildSortChip('Time', 'time', Icons.access_time, Colors.blueAccent),
+              ],
+            ),
+          ),
+          Text(
+            '${_getFilteredReports().length} reports',
+            style: TextStyle(
+              color: Colors.grey[600],
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSortChip(String label, String mode, IconData icon, Color activeColor) {
+    final isSelected = _sortMode == mode;
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _sortMode = mode;
+        });
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: isSelected ? activeColor.withOpacity(0.2) : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: isSelected ? activeColor : Colors.grey[700]!,
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 12,
+              color: isSelected ? activeColor : Colors.grey[500],
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: isSelected ? activeColor : Colors.grey[500],
+                fontSize: 11,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1027,10 +1197,10 @@ class _TimelineScreenState extends State<TimelineScreen>
       position: index,
       duration: const Duration(milliseconds: 500),
       child: SlideAnimation(
-        verticalOffset: 50.0,
+        verticalOffset: 30.0,
         child: FadeInAnimation(
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: FlipCard(
               key: _cardKeys[reportId],
               flipOnTouch: false,
@@ -1047,6 +1217,7 @@ class _TimelineScreenState extends State<TimelineScreen>
                 isEmergency: isEmergency,
                 cardColor: cardColor,
                 textColor: textColor,
+                priorityScore: report['_priorityScore'] as double? ?? 0.0,
               ),
               back: _buildCardBack(
                 reportId: reportId,
@@ -1074,12 +1245,13 @@ class _TimelineScreenState extends State<TimelineScreen>
     required bool isEmergency,
     required Color cardColor,
     required Color textColor,
+    double priorityScore = 0.0,
   }) {
     return AnimatedBuilder(
       animation: _hoverControllers[reportId]!,
       builder: (context, child) {
         final hoverValue = _hoverControllers[reportId]!.value;
-        final scale = 1.0 + hoverValue * 0.05;
+        final scale = 1.0 + hoverValue * 0.02;
 
         return Transform(
           transform: Matrix4.identity()
@@ -1096,187 +1268,216 @@ class _TimelineScreenState extends State<TimelineScreen>
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
-              borderRadius: BorderRadius.circular(16),
+              borderRadius: BorderRadius.circular(12),
               boxShadow: [
                 BoxShadow(
-                  color: cardColor.withOpacity(0.4),
-                  blurRadius: 15,
-                  spreadRadius: 2,
-                  offset: const Offset(0, 8),
+                  color: cardColor.withOpacity(0.3),
+                  blurRadius: 8,
+                  spreadRadius: 1,
+                  offset: const Offset(0, 4),
                 ),
               ],
             ),
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
+              borderRadius: BorderRadius.circular(12),
               child: Material(
                 color: Colors.transparent,
                 child: InkWell(
                   onTap: () => _cardKeys[reportId]?.currentState?.toggleCard(),
                   splashColor: Colors.white10,
                   highlightColor: Colors.white12,
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Crime type badge
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.3),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: Colors.white24,
-                              width: 1,
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                isOffline ? Icons.location_on : Icons.wifi,
-                                size: 14,
-                                color: textColor.withOpacity(0.8),
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                crimeType.toUpperCase(),
-                                style: TextStyle(
-                                  color: textColor.withOpacity(0.8),
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-
-                        const SizedBox(height: 12),
-
-                        // Report description
-                        Text(
-                          reportText,
-                          style: TextStyle(
-                            color: textColor,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w500,
-                          ),
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-
-                        const SizedBox(height: 12),
-
-                        // Location and emergency status
-                        Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Header row with badge and priority
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+                        child: Row(
                           children: [
-                            Icon(
-                              Icons.location_on,
-                              size: 16,
-                              color: textColor.withOpacity(0.8),
-                            ),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                locationText,
-                                style: TextStyle(
-                                  color: textColor.withOpacity(0.8),
-                                  fontSize: 13,
-                                ),
-                                overflow: TextOverflow.ellipsis,
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.3),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    isOffline ? Icons.location_on : Icons.wifi,
+                                    size: 12,
+                                    color: textColor.withOpacity(0.9),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    crimeType.toUpperCase(),
+                                    style: TextStyle(
+                                      color: textColor.withOpacity(0.9),
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
+                            const Spacer(),
                             if (isEmergency)
-                              Padding(
-                                padding: const EdgeInsets.only(left: 8.0),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.withOpacity(0.3),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
                                 child: Row(
+                                  mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    Icon(
-                                      Icons.warning,
-                                      size: 14,
-                                      color: Colors.redAccent,
-                                    ),
-                                    const SizedBox(width: 4),
+                                    Icon(Icons.warning, size: 10, color: Colors.redAccent),
+                                    const SizedBox(width: 2),
                                     Text(
-                                      'EMERGENCY',
+                                      'SOS',
                                       style: TextStyle(
                                         color: Colors.redAccent,
-                                        fontSize: 11,
+                                        fontSize: 9,
                                         fontWeight: FontWeight.bold,
                                       ),
                                     ),
                                   ],
                                 ),
                               ),
+                            if (priorityScore > 30) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: priorityScore > 50
+                                      ? Colors.red.withOpacity(0.2)
+                                      : Colors.orange.withOpacity(0.2),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  priorityScore.toStringAsFixed(0),
+                                  style: TextStyle(
+                                    color: priorityScore > 50 ? Colors.redAccent : Colors.orangeAccent,
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ],
                         ),
+                      ),
 
-                        const SizedBox(height: 12),
+                      const SizedBox(height: 8),
 
-                        // Image preview
-                        if (images.isNotEmpty)
-                          Column(
-                            children: [
-                              _buildImagePreview(
-                                images: images,
-                                reportId: reportId,
-                                crimeType: crimeType,
-                              ),
-                              const SizedBox(height: 12),
-                            ],
+                      // Description
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Text(
+                          reportText,
+                          style: TextStyle(
+                            color: textColor,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                            height: 1.3,
                           ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
 
-                        // Audio indicator
-                        if (audioUrl != null)
-                          Row(
+                      const SizedBox(height: 6),
+
+                      // Location
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.location_on,
+                              size: 12,
+                              color: textColor.withOpacity(0.7),
+                            ),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                locationText,
+                                style: TextStyle(
+                                  color: textColor.withOpacity(0.7),
+                                  fontSize: 11,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 8),
+
+                      // FULL SIZE IMAGE - No height constraint
+                      if (images.isNotEmpty)
+                        _buildImagePreview(
+                          images: images,
+                          reportId: reportId,
+                          crimeType: crimeType,
+                        ),
+
+                      // Audio indicator
+                      if (audioUrl != null)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                          child: Row(
                             children: [
                               Icon(Icons.audiotrack,
-                                  color: textColor.withOpacity(0.8),
-                                  size: 16),
-                              const SizedBox(width: 6),
+                                  color: textColor.withOpacity(0.7),
+                                  size: 14),
+                              const SizedBox(width: 4),
                               Text(
-                                'Audio evidence available',
+                                'Audio',
                                 style: TextStyle(
-                                  color: textColor.withOpacity(0.8),
-                                  fontSize: 13,
+                                  color: textColor.withOpacity(0.7),
+                                  fontSize: 11,
                                 ),
                               ),
                             ],
                           ),
+                        ),
 
-                        // Time and flip indicator
-                        const SizedBox(height: 12),
-                        Row(
+                      // Footer with time and flip hint
+                      Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
                             Text(
                               _formatDate(timestamp),
                               style: TextStyle(
-                                color: textColor.withOpacity(0.6),
-                                fontSize: 12,
+                                color: textColor.withOpacity(0.5),
+                                fontSize: 10,
                               ),
                             ),
                             Row(
                               children: [
                                 Icon(
-                                  Icons.flip_to_front,
-                                  color: textColor.withOpacity(0.6),
-                                  size: 16,
+                                  Icons.flip,
+                                  color: textColor.withOpacity(0.5),
+                                  size: 12,
                                 ),
                                 const SizedBox(width: 4),
                                 Text(
-                                  'Tap to vote',
+                                  'Vote',
                                   style: TextStyle(
-                                    color: textColor.withOpacity(0.6),
-                                    fontSize: 12,
+                                    color: textColor.withOpacity(0.5),
+                                    fontSize: 10,
                                   ),
                                 ),
                               ],
                             ),
                           ],
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -1297,7 +1498,7 @@ class _TimelineScreenState extends State<TimelineScreen>
       animation: _hoverControllers[reportId]!,
       builder: (context, child) {
         final hoverValue = _hoverControllers[reportId]!.value;
-        final scale = 1.0 + hoverValue * 0.05;
+        final scale = 1.0 + hoverValue * 0.02;
 
         return Transform(
           transform: Matrix4.identity()
@@ -1305,24 +1506,24 @@ class _TimelineScreenState extends State<TimelineScreen>
             ..scale(scale),
           alignment: Alignment.center,
           child: Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
                 colors: [Colors.grey, Colors.black87],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
-              borderRadius: BorderRadius.all(Radius.circular(16)),
-              boxShadow: [
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: const [
                 BoxShadow(
                   color: Colors.black45,
-                  blurRadius: 15,
-                  spreadRadius: 2,
-                  offset: Offset(0, 8),
+                  blurRadius: 8,
+                  spreadRadius: 1,
+                  offset: Offset(0, 4),
                 ),
               ],
             ),
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
+              borderRadius: BorderRadius.circular(12),
               child: Material(
                 color: Colors.transparent,
                 child: InkWell(
@@ -1330,20 +1531,20 @@ class _TimelineScreenState extends State<TimelineScreen>
                   splashColor: Colors.white10,
                   highlightColor: Colors.white12,
                   child: Padding(
-                    padding: const EdgeInsets.all(16.0),
+                    padding: const EdgeInsets.all(12),
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         const Text(
-                          'VOTE ON THIS REPORT',
+                          'VOTE',
                           style: TextStyle(
                             color: Colors.white70,
                             fontWeight: FontWeight.bold,
-                            fontSize: 16,
+                            fontSize: 14,
                             letterSpacing: 1,
                           ),
                         ),
-                        const SizedBox(height: 20),
+                        const SizedBox(height: 16),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           children: [
@@ -1385,21 +1586,21 @@ class _TimelineScreenState extends State<TimelineScreen>
                             ),
                           ],
                         ),
-                        const SizedBox(height: 20),
+                        const SizedBox(height: 12),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(
-                              Icons.flip_to_back,
-                              color: textColor.withOpacity(0.6),
-                              size: 16,
+                              Icons.flip,
+                              color: textColor.withOpacity(0.5),
+                              size: 12,
                             ),
-                            const SizedBox(width: 6),
+                            const SizedBox(width: 4),
                             Text(
-                              'Tap to return',
+                              'Back',
                               style: TextStyle(
-                                color: textColor.withOpacity(0.6),
-                                fontSize: 12,
+                                color: textColor.withOpacity(0.5),
+                                fontSize: 10,
                               ),
                             ),
                           ],
@@ -1421,28 +1622,18 @@ class _TimelineScreenState extends State<TimelineScreen>
       baseColor: Colors.grey[800]!,
       highlightColor: Colors.grey[700]!,
       child: ListView.builder(
-        padding: const EdgeInsets.all(16),
-        itemCount: 5,
+        padding: const EdgeInsets.all(12),
+        itemCount: 3,
         itemBuilder: (context, index) {
-          return AnimationConfiguration.staggeredList(
-            position: index,
-            duration: const Duration(milliseconds: 500),
-            child: SlideAnimation(
-              verticalOffset: 50.0,
-              child: FadeInAnimation(
-                child: Card(
-                  color: Colors.grey[850],
-                  margin: const EdgeInsets.only(bottom: 16),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  elevation: 8,
-                  child: const SizedBox(
-                    height: 200,
-                    width: double.infinity,
-                  ),
-                ),
-              ),
+          return Card(
+            color: Colors.grey[850],
+            margin: const EdgeInsets.only(bottom: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const SizedBox(
+              height: 300,
+              width: double.infinity,
             ),
           );
         },
@@ -1463,26 +1654,26 @@ class _TimelineScreenState extends State<TimelineScreen>
         children: [
           Icon(
             Icons.report_problem,
-            size: 80,
+            size: 64,
             color: Colors.grey[600],
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           const Text(
             'No reports found',
             style: TextStyle(
               color: Colors.grey,
-              fontSize: 20,
+              fontSize: 18,
               fontWeight: FontWeight.w500,
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           Text(
             categoryName == 'All'
                 ? 'No ${_selectedMainTab == 0 ? 'offline' : 'online'} reports yet'
                 : 'No reports in "$categoryName" category',
             style: const TextStyle(
               color: Colors.grey,
-              fontSize: 14,
+              fontSize: 13,
             ),
             textAlign: TextAlign.center,
           ),
@@ -1516,20 +1707,27 @@ class _TimelineScreenState extends State<TimelineScreen>
           child: Scaffold(
             backgroundColor: Colors.black,
             appBar: AppBar(
+              toolbarHeight: 30,
               title: const Text(
-                'Community Watch',
+                '',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
-                  letterSpacing: 1.5,
+                  fontSize: 14,
+                  letterSpacing: 1,
                 ),
               ),
               centerTitle: true,
               backgroundColor: Colors.transparent,
               elevation: 0,
               flexibleSpace: Container(
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   gradient: LinearGradient(
-                    colors: [Colors.red, Colors.black],
+                    colors: [
+                      Colors.red[900]!,
+                      Colors.red[800]!,
+                      Colors.black,
+                    ],
+                    stops: [0.0, 0.5, 1.0],
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                   ),
@@ -1537,7 +1735,7 @@ class _TimelineScreenState extends State<TimelineScreen>
               ),
               actions: [
                 IconButton(
-                  icon: const Icon(Icons.refresh, size: 24),
+                  icon: const Icon(Icons.refresh, size: 20),
                   onPressed: () {
                     setState(() {
                       _isLoading = true;
@@ -1551,13 +1749,16 @@ class _TimelineScreenState extends State<TimelineScreen>
             ),
             body: Column(
               children: [
-                // Main tabs (Offline/Online)
+                // Compact main tabs (50px height)
                 _buildMainTabBar(),
 
-                // Category chips
+                // Horizontal scrollable categories (44px height)
                 _buildCategoryChips(),
 
-                // Reports list
+                // Compact sort bar (36px height)
+                _buildSortToggle(),
+
+                // Reports list - takes remaining space
                 Expanded(
                   child: Stack(
                     children: [
@@ -1574,7 +1775,7 @@ class _TimelineScreenState extends State<TimelineScreen>
                           child: AnimationLimiter(
                             child: ListView.builder(
                               controller: _scrollController,
-                              padding: const EdgeInsets.all(8),
+                              padding: const EdgeInsets.symmetric(vertical: 8),
                               itemCount: _getFilteredReports().length,
                               itemBuilder: (context, index) {
                                 final report = _getFilteredReports()[index];
