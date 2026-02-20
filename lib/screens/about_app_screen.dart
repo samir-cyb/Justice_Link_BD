@@ -291,14 +291,14 @@ class AboutAppScreen extends StatelessWidget {
 
                       _buildContactItem(
                         'সাপোর্ট ইমেইল',
-                        'support@justicelinkbd.com',
+                        'redwansamir90@gmail.com',
                         Icons.email,
                         Colors.blue,
                       ),
 
                       _buildContactItem(
                         'ওয়েবসাইট',
-                        'www.justicelinkbd.com',
+                        'not available yet.',
                         Icons.language,
                         Colors.green,
                       ),

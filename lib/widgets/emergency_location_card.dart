@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:latlong2/latlong.dart';
@@ -12,6 +11,7 @@ import 'package:flutter_compass/flutter_compass.dart';
 import 'package:flutter_map_cancellable_tile_provider/flutter_map_cancellable_tile_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:dio/dio.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class EmergencyLocationCard extends StatefulWidget {
   final LatLng callerLocation;
@@ -36,11 +36,12 @@ class EmergencyLocationCard extends StatefulWidget {
 class _EmergencyLocationCardState extends State<EmergencyLocationCard>
     with TickerProviderStateMixin {
 
-  // ... (keep all your existing state variables) ...
   late final AnimatedMapController _animatedMapController;
   MapController get _mapController => _animatedMapController.mapController;
+
   StreamSubscription<Position>? _positionStream;
   StreamSubscription<CompassEvent>? _compassStream;
+
   LatLng? _myPosition;
   double? _myHeading;
   double? _smoothedHeading;
@@ -51,7 +52,10 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
   bool _isRouting = false;
   String _routingError = '';
   bool _mapReady = false;
-  String _debugInfo = 'Initializing...'; // Start with message
+
+  // User details
+  Map<String, dynamic>? _callerUserDetails;
+  bool _loadingUserDetails = false;
 
   DateTime? _lastRouteCalc;
   static const _minRouteCalcInterval = Duration(seconds: 5);
@@ -60,17 +64,13 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
 
   final Distance _distanceCalc = const Distance();
   final Dio _dio = Dio();
+  CancelToken? _cancelToken;
+  final SupabaseClient _supabase = Supabase.instance.client;
 
   @override
   void initState() {
     super.initState();
-    // CRITICAL DEBUG: This MUST appear in logs
-    developer.log('🔵🔵🔵 EmergencyLocationCard: INITSTATE CALLED 🔵🔵🔵');
-    developer.log('   - Caller: ${widget.callerLocation}');
-    developer.log('   - IsOwnEmergency: ${widget.isOwnEmergency}');
-    developer.log('   - UserId: ${widget.userId}');
-    developer.log('   - Timestamp: ${widget.timestamp}');
-    developer.log('   - Widget Key: ${widget.key}');
+    developer.log('🔵 EmergencyLocationCard: INITSTATE');
 
     _animatedMapController = AnimatedMapController(
       vsync: this,
@@ -78,63 +78,70 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
       curve: Curves.easeInOut,
     );
 
-    // Initialize services with error handling
     _initializeServices();
+    _fetchCallerDetails(); // Fetch user details
+  }
+
+  // FIX: Fetch caller details using 'uid' column instead of 'id'
+  Future<void> _fetchCallerDetails() async {
+    if (widget.userId.isEmpty || widget.isOwnEmergency) return;
+
+    developer.log('🔍 Fetching caller details for uid: ${widget.userId}');
+
+    setState(() => _loadingUserDetails = true);
+
+    try {
+      // FIX: Use 'uid' column to match your database schema
+      final response = await _supabase
+          .from('users')
+          .select('full_name, phone_number')
+          .eq('uid', widget.userId)  // <-- FIXED: was 'id', now 'uid'
+          .maybeSingle();
+
+      developer.log('📊 Supabase response: $response');
+
+      if (mounted && response != null) {
+        setState(() {
+          _callerUserDetails = response;
+          _loadingUserDetails = false;
+        });
+        developer.log('✅ Caller details fetched: ${response['full_name']}');
+      } else {
+        developer.log('⚠️ No user found for uid: ${widget.userId}');
+        if (mounted) setState(() => _loadingUserDetails = false);
+      }
+    } catch (e, stackTrace) {
+      developer.log('❌ Error fetching caller details: $e');
+      developer.log('   Stack: $stackTrace');
+      if (mounted) setState(() => _loadingUserDetails = false);
+    }
   }
 
   Future<void> _initializeServices() async {
-    developer.log('🚀 Starting service initialization...');
     try {
       await _startLocationStream();
       _startCompassStream();
-      developer.log('✅ All services initialized successfully');
-    } catch (e, stackTrace) {
-      developer.log('❌ Service initialization failed: $e');
-      developer.log('   Stack: $stackTrace');
-      setState(() {
-        _debugInfo = 'INIT ERROR: $e';
-      });
+    } catch (e) {
+      developer.log('Service init error: $e');
     }
   }
 
   @override
   void dispose() {
-    developer.log('🔴🔴🔴 EmergencyLocationCard: DISPOSE CALLED 🔴🔴🔴');
+    _cancelToken?.cancel();
     _positionStream?.cancel();
     _compassStream?.cancel();
     _animatedMapController.dispose();
     super.dispose();
   }
 
-  void _updateDebugInfo(String info) {
-    if (mounted) {
-      setState(() {
-        _debugInfo = info;
-      });
-    }
-    developer.log('🐛 DEBUG: $info');
-  }
-
-  /* ------------- COMPASS ------------- */
   void _startCompassStream() {
-    developer.log('🧭 Starting compass stream...');
-
-    if (FlutterCompass.events == null) {
-      developer.log('   - ❌ Compass events not available');
-      _updateDebugInfo('Compass not available');
-      return;
-    }
+    if (FlutterCompass.events == null) return;
 
     _compassStream = FlutterCompass.events!.listen((CompassEvent event) {
       if (!mounted) return;
-
       final heading = event.heading;
-      if (heading != null) {
-        _updateSmoothedHeading(heading);
-        developer.log('🧭 Compass: ${heading.toStringAsFixed(1)}°');
-      }
-    }, onError: (e) {
-      developer.log('   - ❌ Compass error: $e');
+      if (heading != null) _updateSmoothedHeading(heading);
     });
   }
 
@@ -149,58 +156,29 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
       if (_smoothedHeading! < 0) _smoothedHeading = _smoothedHeading! + 360;
     }
 
-    if (mounted) {
-      setState(() {
-        _myHeading = _smoothedHeading;
-      });
-    }
+    if (mounted) setState(() => _myHeading = _smoothedHeading);
   }
 
-  /* ------------- LOCATION ------------- */
   Future<void> _startLocationStream() async {
-    developer.log('📡 Starting location stream...');
-    _updateDebugInfo('Checking location...');
-
     bool service = await Geolocator.isLocationServiceEnabled();
-    developer.log('   - Location service: $service');
-
     if (!service) {
-      _updateDebugInfo('❌ Location service disabled');
       setState(() => _routingError = 'Location service disabled');
       return;
     }
 
     LocationPermission p = await Geolocator.checkPermission();
-    developer.log('   - Permission: $p');
-
-    if (p == LocationPermission.denied) {
-      p = await Geolocator.requestPermission();
-    }
-
-    if (p == LocationPermission.deniedForever) {
-      _updateDebugInfo('❌ Permission denied forever');
-      setState(() => _routingError = 'Location permission denied');
-      return;
-    }
-
-    if (p != LocationPermission.whileInUse && p != LocationPermission.always) {
-      _updateDebugInfo('❌ Insufficient permission');
-      setState(() => _routingError = 'Location permission required');
-      return;
-    }
+    if (p == LocationPermission.denied) p = await Geolocator.requestPermission();
+    if (p == LocationPermission.deniedForever) return;
 
     const settings = LocationSettings(
       accuracy: LocationAccuracy.bestForNavigation,
       distanceFilter: 2,
     );
 
-    // Get initial position
     try {
-      _updateDebugInfo('Getting initial position...');
       final initialPos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.bestForNavigation,
       );
-      developer.log('   - Initial position: ${initialPos.latitude}, ${initialPos.longitude}');
 
       if (!mounted) return;
 
@@ -209,25 +187,17 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
         _positionHistory = [_myPosition!];
       });
 
-      _updateDebugInfo('✅ Position: ${_myPosition!.latitude.toStringAsFixed(5)}, ${_myPosition!.longitude.toStringAsFixed(5)}');
-
       await _updateRouteAndMetadata();
       _centerCameraOnUser();
     } catch (e) {
-      developer.log('   - ❌ Initial position error: $e');
-      _updateDebugInfo('❌ GPS Error: $e');
+      developer.log('Initial position error: $e');
     }
 
-    // Start stream
     _positionStream = Geolocator.getPositionStream(locationSettings: settings)
         .listen((Position pos) {
       if (!mounted) return;
 
       final newPos = LatLng(pos.latitude, pos.longitude);
-      final distanceMoved = _myPosition != null
-          ? _distanceCalc.as(LengthUnit.Meter, _myPosition!, newPos)
-          : 0.0;
-
       _positionHistory.add(newPos);
       if (_positionHistory.length > 3) _positionHistory.removeAt(0);
 
@@ -239,14 +209,6 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
 
       _centerCameraOnUser();
       _checkRouteRecalculation();
-
-      _updateDebugInfo('📍 ${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)} | '
-          'Heading: ${_myHeading?.toStringAsFixed(0) ?? "calc..."}° | '
-          'Moved: ${distanceMoved.toStringAsFixed(1)}m');
-
-    }, onError: (e) {
-      developer.log('   - ❌ Position stream error: $e');
-      _updateDebugInfo('❌ Stream error: $e');
     });
   }
 
@@ -261,10 +223,8 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
     _updateSmoothedHeading(heading);
   }
 
-  /* ------------- CAMERA ------------- */
   void _centerCameraOnUser() {
     if (!_mapReady || _myPosition == null) return;
-
     final targetRotation = _myHeading ?? 0.0;
 
     _animatedMapController.animateTo(
@@ -282,7 +242,6 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
 
     final distanceToRoute = _calculateDistanceToRoute(_myPosition!, _routePoints);
     if (distanceToRoute > _maxDeviationMeters) {
-      _updateDebugInfo('🔄 Recalculating (deviated ${distanceToRoute.toStringAsFixed(0)}m)');
       _updateRouteAndMetadata();
     }
   }
@@ -324,13 +283,10 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
     return _distanceCalc.as(LengthUnit.Meter, p, closestPoint);
   }
 
-  /* ------------- ROUTING ------------- */
   Future<void> _updateRouteAndMetadata() async {
     if (_myPosition == null) return;
 
-    developer.log('🗺️ Updating route...');
     setState(() => _isRouting = true);
-    _updateDebugInfo('Calculating route...');
 
     final straightDistance = _distanceCalc.as(
       LengthUnit.Meter,
@@ -351,12 +307,11 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
           _routePoints = points;
           _distance = distanceM;
           _eta = _formatETA(durationS);
-          _routingError = points.length <= 2 ? 'Direct path (routing unavailable)' : '';
+          _routingError = points.length <= 2 ? 'Direct path' : '';
           _isRouting = false;
         });
 
         _lastRouteCalc = DateTime.now();
-        _updateDebugInfo('✅ Route: ${distanceM.toStringAsFixed(0)}m, ETA: ${_formatETA(durationS)}');
       } else {
         throw Exception('No route points');
       }
@@ -367,44 +322,52 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
         _routePoints = [_myPosition!, widget.callerLocation];
         _distance = straightDistance;
         _eta = null;
-        _routingError = 'Using direct path';
+        _routingError = 'Direct path';
         _isRouting = false;
       });
-
-      _updateDebugInfo('⚠️ Using straight line: ${straightDistance.toStringAsFixed(0)}m');
     }
   }
 
   Future<List<LatLng>?> _tryOSRM() async {
+    _cancelToken = CancelToken();
+
     try {
       final url = 'https://router.project-osrm.org/route/v1/foot/'
           '${_myPosition!.longitude},${_myPosition!.latitude};'
           '${widget.callerLocation.longitude},${widget.callerLocation.latitude}'
           '?overview=full&geometries=geojson';
 
-      developer.log('   - OSRM URL: $url');
-
       final res = await _dio.get(
         url,
+        cancelToken: _cancelToken,
         options: Options(
-          validateStatus: (status) => status! < 500,
+          validateStatus: (status) => true,
           sendTimeout: const Duration(seconds: 5),
           receiveTimeout: const Duration(seconds: 5),
         ),
       );
 
-      if (res.statusCode != 200 || res.data['code'] != 'Ok') {
-        developer.log('   - OSRM failed: ${res.statusCode}');
-        return null;
-      }
+      if (res.statusCode == 404) return null;
+      if (res.statusCode != 200) return null;
+      if (res.data == null || res.data['code'] != 'Ok') return null;
 
-      final coordinates = res.data['routes'][0]['geometry']['coordinates'] as List;
+      final routes = res.data['routes'] as List?;
+      if (routes == null || routes.isEmpty) return null;
+
+      final geometry = routes[0]['geometry'];
+      if (geometry == null) return null;
+
+      final coordinates = geometry['coordinates'] as List?;
+      if (coordinates == null) return null;
+
       return coordinates.map((coord) {
         return LatLng((coord[1] as num).toDouble(), (coord[0] as num).toDouble());
       }).toList();
 
+    } on DioException catch (e) {
+      if (CancelToken.isCancel(e)) return null;
+      return null;
     } catch (e) {
-      developer.log('   - OSRM error: $e');
       return null;
     }
   }
@@ -430,111 +393,203 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
     return (bearing + 360) % 360;
   }
 
-  /* ------------- UI ------------- */
+  // Build caller info widget
+  Widget _buildCallerInfo() {
+    if (widget.isOwnEmergency) {
+      return const SizedBox.shrink();
+    }
+
+    if (_loadingUserDetails) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 8),
+            Text('Loading caller info...', style: TextStyle(color: Colors.white70, fontSize: 11)),
+          ],
+        ),
+      );
+    }
+
+    if (_callerUserDetails == null) {
+      // Show unknown if lookup failed but we're not loading
+      return Container(
+        padding: const EdgeInsets.all(10),
+        margin: const EdgeInsets.only(bottom: 8),
+        decoration: BoxDecoration(
+          color: Colors.black45,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.red.withOpacity(0.3)),
+        ),
+        child: const Row(
+          children: [
+            Icon(Icons.person_off, color: Colors.grey, size: 16),
+            SizedBox(width: 6),
+            Text(
+              'Caller: Unknown',
+              style: TextStyle(
+                color: Colors.white70,
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final name = _callerUserDetails!['full_name'] ?? 'Unknown';
+    final phone = _callerUserDetails!['phone_number'] ?? '';
+
+    return Container(
+      padding: const EdgeInsets.all(10),
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: Colors.black45,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.red.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.person, color: Colors.orange, size: 16),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Caller: $name',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              const Icon(Icons.phone, color: Colors.green, size: 16),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  phone,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+              // Call button
+              GestureDetector(
+                onTap: () async {
+                  if (phone.isNotEmpty) {
+                    final uri = Uri.parse('tel:$phone');
+                    if (await canLaunchUrl(uri)) {
+                      await launchUrl(uri);
+                    }
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.green,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Text(
+                    'CALL',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    developer.log('🏗️ EmergencyLocationCard BUILD called');
-
     return AbsorbPointer(
       absorbing: _isRouting,
       child: Card(
-        margin: const EdgeInsets.only(bottom: 16),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        color: Colors.red.withOpacity(0.2),
+        margin: const EdgeInsets.all(8),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        color: Colors.red.withOpacity(0.15),
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(10),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Header
+              // Header - Compact
               Row(
                 children: [
                   Icon(
                     widget.isOwnEmergency ? Icons.warning : Icons.emergency,
                     color: Colors.red,
+                    size: 18,
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 4),
                   Text(
                     widget.isOwnEmergency ? 'YOUR EMERGENCY' : 'NEARBY EMERGENCY',
                     style: const TextStyle(
                       color: Colors.red,
                       fontWeight: FontWeight.bold,
-                      fontSize: 16,
+                      fontSize: 12,
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 6),
 
-              // Debug Panel
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(8),
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(
-                  color: Colors.black87,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.yellow),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'DEBUG INFO:',
-                      style: TextStyle(
-                        color: Colors.yellow,
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      _debugInfo,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+              // Caller Info
+              _buildCallerInfo(),
 
-              // Distance & ETA
+              // Distance & ETA - Compact
               if (_distance != null) ...[
                 Container(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
                     color: Colors.black45,
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(6),
                   ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
                       Column(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Text('DISTANCE', style: TextStyle(color: Colors.white70, fontSize: 10)),
+                          const Text('DISTANCE', style: TextStyle(color: Colors.white70, fontSize: 8)),
                           Text(
                             '${_distance!.toStringAsFixed(0)} m',
                             style: const TextStyle(
                               color: Colors.white,
-                              fontSize: 20,
+                              fontSize: 16,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
                         ],
                       ),
                       if (_eta != null) ...[
-                        Container(width: 1, height: 30, color: Colors.white24),
+                        Container(width: 1, height: 20, color: Colors.white24),
                         Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Text('ETA', style: TextStyle(color: Colors.white70, fontSize: 10)),
+                            const Text('ETA', style: TextStyle(color: Colors.white70, fontSize: 8)),
                             Text(
                               _eta!,
                               style: const TextStyle(
                                 color: Colors.green,
-                                fontSize: 20,
+                                fontSize: 16,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
@@ -544,77 +599,73 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
                     ],
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 6),
               ],
 
               if (_routingError.isNotEmpty)
                 Text(
                   '⚠️ $_routingError',
-                  style: const TextStyle(color: Colors.orange, fontSize: 12),
+                  style: const TextStyle(color: Colors.orange, fontSize: 10),
                 ),
 
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
 
-              // Map
+              // Map - INCREASED height
               SizedBox(
-                height: 300,
+                height: 280,
                 child: _buildMapSection(),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 6),
 
-              // Coordinates
+              // Coordinates - Compact
               Text(
                 '📍 Caller: ${widget.callerLocation.latitude.toStringAsFixed(5)}, ${widget.callerLocation.longitude.toStringAsFixed(5)}',
-                style: const TextStyle(color: Colors.white70, fontSize: 12),
+                style: const TextStyle(color: Colors.white70, fontSize: 9),
               ),
               if (_myPosition != null) ...[
                 Text(
                   '📍 You: ${_myPosition!.latitude.toStringAsFixed(5)}, ${_myPosition!.longitude.toStringAsFixed(5)}',
-                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  style: const TextStyle(color: Colors.white70, fontSize: 9),
                 ),
                 if (_myHeading != null)
                   Text(
-                    '🧭 Heading: ${_myHeading!.toStringAsFixed(0)}° ${_getDirectionText(_myHeading!)}',
-                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                    '🧭 ${_myHeading!.toStringAsFixed(0)}° ${_getDirectionText(_myHeading!)}',
+                    style: const TextStyle(color: Colors.white70, fontSize: 9),
                   ),
               ],
               Text(
-                '🕐 Reported: ${DateFormat('MMM dd, yyyy – hh:mm a').format(widget.timestamp)}',
-                style: const TextStyle(color: Colors.white70, fontSize: 12),
+                '🕐 ${DateFormat('MMM dd, hh:mm a').format(widget.timestamp)}',
+                style: const TextStyle(color: Colors.white70, fontSize: 9),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 6),
 
-              // Buttons
+              // Buttons - Compact
               if (!widget.isOwnEmergency && _myPosition != null)
                 Row(
                   children: [
                     Expanded(
                       child: ElevatedButton.icon(
-                        onPressed: () {
-                          developer.log('🎯 Recenter pressed');
-                          _centerCameraOnUser();
-                        },
-                        icon: const Icon(Icons.my_location, size: 18),
-                        label: const Text('RECENTER'),
+                        onPressed: () => _centerCameraOnUser(),
+                        icon: const Icon(Icons.my_location, size: 14),
+                        label: const Text('RECENTER', style: TextStyle(fontSize: 11)),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.blue,
                           foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 8),
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                     Expanded(
                       flex: 2,
                       child: ElevatedButton.icon(
-                        onPressed: () {
-                          developer.log('🆘 RESPOND pressed');
-                          widget.onRespond();
-                        },
-                        icon: const Icon(Icons.emergency, size: 18),
-                        label: const Text('RESPOND'),
+                        onPressed: () => widget.onRespond(),
+                        icon: const Icon(Icons.emergency, size: 14),
+                        label: const Text('RESPOND', style: TextStyle(fontSize: 11)),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.red,
                           foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 8),
                         ),
                       ),
                     ),
@@ -640,7 +691,7 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
 
   Widget _buildMapSection() {
     return ClipRRect(
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
       child: Stack(
         children: [
           FlutterMap(
@@ -649,7 +700,6 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
               initialCenter: widget.callerLocation,
               initialZoom: 15,
               onMapReady: () {
-                developer.log('🗺️ Map ready');
                 setState(() => _mapReady = true);
                 if (_myPosition != null) _centerCameraOnUser();
               },
@@ -676,8 +726,8 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
                     Polyline(
                       points: _routePoints,
                       color: Colors.blue.withOpacity(0.9),
-                      strokeWidth: 6,
-                      borderStrokeWidth: 2,
+                      strokeWidth: 4,
+                      borderStrokeWidth: 1,
                       borderColor: Colors.white,
                     ),
                   ],
@@ -685,21 +735,22 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
 
               MarkerLayer(
                 markers: [
+                  // Caller marker
                   Marker(
-                    width: 50,
-                    height: 50,
+                    width: 36,
+                    height: 36,
                     point: widget.callerLocation,
                     child: const Icon(
                       Icons.location_pin,
                       color: Colors.red,
-                      size: 50,
-                      shadows: [Shadow(color: Colors.black45, blurRadius: 4)],
+                      size: 36,
                     ),
                   ),
+                  // Responder marker - SMALL arrow
                   if (_myPosition != null)
                     Marker(
-                      width: 60,
-                      height: 60,
+                      width: 32,
+                      height: 32,
                       point: _myPosition!,
                       rotate: true,
                       child: _buildRotatingArrow(),
@@ -716,9 +767,13 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    CircularProgressIndicator(color: Colors.white),
-                    SizedBox(height: 8),
-                    Text('Calculating...', style: TextStyle(color: Colors.white)),
+                    SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    ),
+                    SizedBox(height: 4),
+                    Text('Loading...', style: TextStyle(color: Colors.white, fontSize: 10)),
                   ],
                 ),
               ),
@@ -744,13 +799,21 @@ class _EmergencyLocationCardState extends State<EmergencyLocationCard>
       turns: rotationAngle / (2 * math.pi),
       duration: const Duration(milliseconds: 200),
       child: Container(
+        width: 28,
+        height: 28,
         decoration: BoxDecoration(
           color: widget.isOwnEmergency ? Colors.red : Colors.blue,
           shape: BoxShape.circle,
-          border: Border.all(color: Colors.white, width: 3),
-          boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 6)],
+          border: Border.all(color: Colors.white, width: 2),
+          boxShadow: const [
+            BoxShadow(color: Colors.black45, blurRadius: 3),
+          ],
         ),
-        child: const Icon(Icons.navigation, color: Colors.white, size: 30),
+        child: const Icon(
+          Icons.navigation,
+          color: Colors.white,
+          size: 16,
+        ),
       ),
     );
   }

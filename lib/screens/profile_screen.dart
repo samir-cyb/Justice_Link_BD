@@ -139,7 +139,7 @@ class ProfileScreen extends StatelessWidget {
               ),
               const SizedBox(height: 24),
 
-              // Horizontal Action Buttons - ALL IN ONE ROW
+              // Horizontal Action Buttons - SCROLLABLE ROW
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
                 decoration: BoxDecoration(
@@ -149,64 +149,67 @@ class ProfileScreen extends StatelessWidget {
                     color: Colors.white.withOpacity(0.1),
                   ),
                 ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    _buildActionButton(
-                      context: context,
-                      icon: Icons.history,
-                      label: 'History',
-                      color: Colors.purple,
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => const ComplaintHistoryScreen(),
-                          ),
-                        );
-                      },
-                    ),
-                    _buildDivider(),
-                    _buildActionButton(
-                      context: context,
-                      icon: Icons.settings,
-                      label: 'Settings',
-                      color: Colors.blue,
-                      onTap: () {
-                        // Navigate to settings
-                      },
-                    ),
-                    _buildDivider(),
-                    _buildActionButton(
-                      context: context,
-                      icon: Icons.info_outline,
-                      label: 'About',
-                      color: Colors.orange,
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => const AboutAppScreen(),
-                          ),
-                        );
-                      },
-                    ),
-                    _buildDivider(),
-                    _buildActionButton(
-                      context: context,
-                      icon: Icons.local_police,
-                      label: 'Police',
-                      color: Colors.red,
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => const PoliceInfoScreen(),
-                          ),
-                        );
-                      },
-                    ),
-                  ],
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      _buildActionButton(
+                        context: context,
+                        icon: Icons.history,
+                        label: 'History',
+                        color: Colors.purple,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const ComplaintHistoryScreen(),
+                            ),
+                          );
+                        },
+                      ),
+                      _buildDivider(),
+                      _buildActionButton(
+                        context: context,
+                        icon: Icons.settings,
+                        label: 'Settings',
+                        color: Colors.blue,
+                        onTap: () {
+                          // Navigate to settings
+                        },
+                      ),
+                      _buildDivider(),
+                      _buildActionButton(
+                        context: context,
+                        icon: Icons.info_outline,
+                        label: 'About',
+                        color: Colors.orange,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const AboutAppScreen(),
+                            ),
+                          );
+                        },
+                      ),
+                      _buildDivider(),
+                      _buildActionButton(
+                        context: context,
+                        icon: Icons.local_police,
+                        label: 'Police',
+                        color: Colors.red,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const PoliceInfoScreen(),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
                 ),
               ),
 

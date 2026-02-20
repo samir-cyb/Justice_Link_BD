@@ -11,6 +11,8 @@ class AnimatedInputField extends StatefulWidget {
   final void Function(String)? onChanged;
   final VoidCallback? onTap;
   final Widget? suffixIcon;
+  final int? maxLines;           // ADDED: maxLines parameter
+  final int? minLines;           // ADDED: minLines parameter (optional)
 
   const AnimatedInputField({
     super.key,
@@ -24,6 +26,8 @@ class AnimatedInputField extends StatefulWidget {
     this.onChanged,
     this.onTap,
     this.suffixIcon,
+    this.maxLines = 1,           // ADDED: default to 1 (single line)
+    this.minLines,               // ADDED: optional minLines
   });
 
   @override
@@ -65,6 +69,8 @@ class _AnimatedInputFieldState extends State<AnimatedInputField> {
             onSaved: widget.onSaved,
             onChanged: widget.onChanged,
             onTap: widget.onTap,
+            maxLines: widget.maxLines,        // ADDED: pass maxLines
+            minLines: widget.minLines,        // ADDED: pass minLines
             style: TextStyle(
               color: Colors.white.withOpacity(0.9),
               fontSize: 16,
@@ -94,6 +100,8 @@ class _AnimatedInputFieldState extends State<AnimatedInputField> {
                   width: 2,
                 ),
               ),
+              // ADDED: Adjust alignment for multi-line fields
+              alignLabelWithHint: widget.maxLines != null && widget.maxLines! > 1,
               contentPadding: const EdgeInsets.symmetric(
                 vertical: 18,
                 horizontal: 16,

@@ -10,7 +10,7 @@ class ReportService {
   final SupabaseClient _supabase = Supabase.instance.client;
   final ImageProcessor _imageProcessor = ImageProcessor();
 
-  // NEW: Pre-upload image verification (client-side only)
+  // Pre-upload image verification (client-side only)
   Future<Map<String, dynamic>> verifyImageBeforeUpload({
     required XFile imageFile,
     required LatLng userLocation,
@@ -19,7 +19,6 @@ class ReportService {
     try {
       debugPrint('🔍 Starting pre-upload image verification...');
 
-      // Run the image processor verification
       final result = await _imageProcessor.processImage(
         imageFile: imageFile,
         userLocation: userLocation,
@@ -29,56 +28,59 @@ class ReportService {
 
       debugPrint('📊 Verification result: ${result['status']}');
 
-      // Check if image should be rejected
       if (result['status'] == 'rejected') {
         return {
           'status': 'rejected',
           'reasons': result['reasons'] is List ? List<String>.from(result['reasons']) : ['Image verification failed'],
           'details': result['details'] is Map<String, dynamic> ? Map<String, dynamic>.from(result['details']) : {},
-          'should_upload': false, // DO NOT UPLOAD TO SUPABASE
+          'should_upload': false,
         };
       } else if (result['status'] == 'needs_review') {
         return {
           'status': 'needs_review',
           'reasons': result['reasons'] is List ? List<String>.from(result['reasons']) : ['Image needs human review'],
           'details': result['details'] is Map<String, dynamic> ? Map<String, dynamic>.from(result['details']) : {},
-          'should_upload': true, // Upload but flag for review
+          'should_upload': true,
         };
       } else {
         return {
           'status': 'approved',
           'reasons': [],
           'details': result['details'] is Map<String, dynamic> ? Map<String, dynamic>.from(result['details']) : {},
-          'should_upload': true, // Safe to upload
+          'should_upload': true,
         };
       }
-
     } catch (e) {
       debugPrint('❌ Pre-upload verification error: $e');
       return {
         'status': 'error',
         'reasons': ['Verification error: $e'],
-        'should_upload': false, // Don't upload on error
+        'should_upload': false,
       };
     }
   }
 
-  // UPDATED: Submit report with verification
+  // Submit report with verification - FIXED for your schema
   Future<Map<String, dynamic>> submitReportWithVerification({
     required String description,
     required LatLng location,
     required String area,
     required String crimeCategory,
     required List<XFile> images,
+    List<String> videos = const [],
     required String userId,
     String? audioUrl,
     bool isEmergency = false,
-    bool runImageVerification = true, // NEW: Parameter to control verification
+    bool runImageVerification = true,
   }) async {
     try {
       debugPrint('📝 Starting report submission...');
+      debugPrint('📹 Videos to attach: ${videos.length}');
+      debugPrint('🔍 User ID: $userId');
+      debugPrint('🔍 Crime Category: $crimeCategory');
+      debugPrint('🔍 Area: $area');
+      debugPrint('🔍 Location: ${location.latitude}, ${location.longitude}');
 
-      // Step 1: Process each image locally first (only if verification is required)
       List<Map<String, dynamic>> imageResults = [];
       List<String> imageUrls = [];
 
@@ -86,7 +88,6 @@ class ReportService {
         for (final image in images) {
           debugPrint('🖼️ Processing image: ${image.name}');
 
-          // Run local verification pipeline
           final verificationResult = await verifyImageBeforeUpload(
             imageFile: image,
             userLocation: location,
@@ -94,7 +95,6 @@ class ReportService {
           );
 
           if (verificationResult['status'] == 'rejected') {
-            // Image failed local verification - reject immediately
             return {
               'success': false,
               'error': 'Image verification failed',
@@ -110,105 +110,110 @@ class ReportService {
           imageResults.add(verificationResult);
         }
       } else {
-        debugPrint('⚠️ Skipping image verification (not required or no images)');
+        debugPrint('⚠️ Skipping image verification');
       }
 
-      debugPrint('✅ Images passed local verification or verification skipped');
-
-      // Step 2: Create report entry in database
+      // ✅ FIXED: Only include columns that exist in your table
       final locationText = 'POINT(${location.longitude} ${location.latitude})';
 
       final reportData = {
         'description': description,
         'location': locationText,
-        'area': area,
+        'area_static': area,              // ✅ Fixed: was 'area'
         'crime_type': crimeCategory,
-        'is_emergency': isEmergency,
         'user_id': userId,
-        'audio_url': audioUrl,
-        'votes': {'dangerous': 0, 'suspicious': 0, 'normal': 0, 'fake': 0},
-        'user_votes': {},
-        'verification_status': runImageVerification ? 'pending' : 'not_required',
-        'image_verified': runImageVerification && images.isNotEmpty,
-        'is_sensitive': false,
-        'sensitive_views': 0,
+        'status': 'active',                // ✅ Fixed: required by CHECK constraint
         'created_at': DateTime.now().toIso8601String(),
+        // REMOVED: is_emergency, audio_url, votes, user_votes,
+        //          verification_status, image_verified, is_sensitive, sensitive_views
       };
 
+      // 🔥🔥🔥 CRITICAL DEBUG PRINTS - Check exactly what's being sent
+      debugPrint('🔥🔥🔥 ====================================');
+      debugPrint('🔥🔥🔥 FINAL REPORT DATA MAP: $reportData');
+      debugPrint('🔥🔥🔥 STATUS VALUE: "${reportData['status']}"');
+      debugPrint('🔥🔥🔥 STATUS RUNTIME TYPE: ${reportData['status'].runtimeType}');
+      debugPrint('🔥🔥🔥 ALL KEYS: ${reportData.keys.toList()}');
+      debugPrint('🔥🔥🔥 JSON ENCODED: ${jsonEncode(reportData)}');
+      debugPrint('🔥🔥🔥 ====================================');
+      final allowedStatuses = ['active', 'resolved', 'under_review'];
+      final currentStatus = reportData['status'] as String?;
+      debugPrint('🔥🔥🔥 IS STATUS ALLOWED? ${allowedStatuses.contains(currentStatus)}');
+      debugPrint('🔥🔥🔥 STATUS LENGTH: ${currentStatus?.length}');
+      debugPrint('🔥🔥🔥 STATUS CODE UNITS: ${currentStatus?.codeUnits}');
+
+      debugPrint('📊 About to insert to nirbacon_crime...');
+
+      debugPrint('📊 Report data: $reportData');
+
       final reportResponse = await _supabase
-          .from('reports')
+          .from('nirbacon_crime')
           .insert(reportData)
           .select('id')
           .single();
 
       final reportId = reportResponse['id'] as String;
+
       debugPrint('📄 Report created with ID: $reportId');
 
-      // Step 3: Upload images to storage (only if verification passed or not required)
+      // Upload images
       for (int i = 0; i < images.length; i++) {
         final image = images[i];
 
         try {
-          // Upload image
           final imageUrl = await _imageProcessor.uploadImageToStorage(
             imageFile: image,
             reportId: reportId,
             userId: userId,
           );
 
-          imageUrls.add(imageUrl);
+          if (imageUrl.isNotEmpty) {
+            imageUrls.add(imageUrl);
 
-          // Call edge function for server-side verification (only if needed AND we have valid imageUrl)
-          if (runImageVerification && imageUrl.isNotEmpty) {
-            final verificationData = i < imageResults.length
-                ? Map<String, dynamic>.from(imageResults[i])
-                : <String, dynamic>{};
-            await _callVerificationEdgeFunction(
-              reportId: reportId,
-              imageUrl: imageUrl,
-              verificationData: verificationData,
-              userId: userId,
-              crimeCategory: crimeCategory,
-            );
-          } else if (runImageVerification && imageUrl.isEmpty) {
-            debugPrint('⚠️ Skipping verification for image ${image.name} - no valid URL');
+            if (runImageVerification) {
+              final verificationData = i < imageResults.length
+                  ? Map<String, dynamic>.from(imageResults[i])
+                  : <String, dynamic>{};
+              await _callVerificationEdgeFunction(
+                reportId: reportId,
+                imageUrl: imageUrl,
+                verificationData: verificationData,
+                userId: userId,
+                crimeCategory: crimeCategory,
+              );
+            }
           }
-
         } catch (e) {
           debugPrint('❌ Error uploading image ${image.name}: $e');
-          // Continue with other images
         }
       }
 
-      // Step 4: Update report with image URLs
+      // ✅ FIXED: Update correct table
+      final updateData = <String, dynamic>{};
       if (imageUrls.isNotEmpty) {
-        await _supabase
-            .from('reports')
-            .update({
-          'images': imageUrls,  // ← ONLY THIS, NO OTHER COLUMNS
-        })
-            .eq('id', reportId);
+        updateData['images'] = imageUrls;
+      }
+      if (videos.isNotEmpty) {
+        updateData['videos'] = videos;
+        debugPrint('📹 Attaching ${videos.length} videos to report');
       }
 
-      // Step 5: Get crime category details
-      final categoryResponse = await _supabase
-          .from('crime_categories')
-          .select('requires_sensitive_filter')
-          .eq('name', crimeCategory)
-          .maybeSingle();
-
-      final requiresSensitiveFilter = categoryResponse?['requires_sensitive_filter'] ?? false;
+      if (updateData.isNotEmpty) {
+        await _supabase
+            .from('nirbacon_crime')           // ✅ Fixed: was 'reports'
+            .update(updateData)
+            .eq('id', reportId);
+      }
 
       return {
         'success': true,
         'report_id': reportId,
         'message': 'Report submitted successfully',
-        'requires_sensitive_filter': requiresSensitiveFilter,
         'image_count': images.length,
         'verified_images': imageUrls.length,
         'verification_performed': runImageVerification,
+        'video_count': videos.length,
       };
-
     } catch (e) {
       debugPrint('❌ Report submission error: $e');
       return {
@@ -218,7 +223,7 @@ class ReportService {
     }
   }
 
-  // UPDATED: Call the edge function for server-side verification with null check
+  // Call edge function for server-side verification
   Future<void> _callVerificationEdgeFunction({
     required String reportId,
     required String imageUrl,
@@ -226,7 +231,6 @@ class ReportService {
     required String userId,
     required String crimeCategory,
   }) async {
-    // Check for null or empty imageUrl before proceeding
     if (imageUrl.isEmpty) {
       debugPrint('❌ Cannot call verification without image URL');
       return;
@@ -244,19 +248,13 @@ class ReportService {
         },
       );
 
-      // Handle the response
-      final status = response.status;
-      final data = response.data;
-
-      if (status == 200) {
-        debugPrint('✅ Edge function result: ${data['overall_status']}');
+      if (response.status == 200) {
+        debugPrint('✅ Edge function result: ${response.data['overall_status']}');
       } else {
-        debugPrint('❌ Edge function error: $status - $data');
+        debugPrint('❌ Edge function error: ${response.status} - ${response.data}');
       }
     } catch (e) {
       debugPrint('❌ Edge function call error: $e');
-
-      // Fallback: Store basic verification locally (with imageUrl check)
       await _storeBasicVerification(
         reportId: reportId,
         imageUrl: imageUrl,
@@ -267,7 +265,7 @@ class ReportService {
     }
   }
 
-  // UPDATED: Helper method to store verification locally with null check
+  // Store verification locally (fallback)
   Future<void> _storeBasicVerification({
     required String reportId,
     required String imageUrl,
@@ -275,7 +273,6 @@ class ReportService {
     required String userId,
     required String crimeCategory,
   }) async {
-    // Check for null or empty imageUrl before storing
     if (imageUrl.isEmpty) {
       debugPrint('⚠️ Cannot store verification without image URL');
       return;
@@ -313,7 +310,7 @@ class ReportService {
     }
   }
 
-  // Get all categories (both online and offline)
+  // Get all categories
   Future<Map<String, List<Map<String, dynamic>>>> getAllCategories() async {
     try {
       final response = await _supabase
@@ -337,12 +334,12 @@ class ReportService {
     }
   }
 
-  // Update location data in report
+  // ✅ FIXED: Update location - correct table name
   Future<void> updateReportLocation(String reportId, LatLng location) async {
     try {
       final locationText = 'POINT(${location.longitude} ${location.latitude})';
       await _supabase
-          .from('reports')
+          .from('nirbacon_crime')              // ✅ Fixed: was 'reports'
           .update({
         'location': locationText,
         'updated_at': DateTime.now().toIso8601String(),
@@ -353,11 +350,11 @@ class ReportService {
     }
   }
 
-  // Get location data from report
+  // ✅ FIXED: Get location - correct table name
   Future<LatLng?> getReportLocation(String reportId) async {
     try {
       final response = await _supabase
-          .from('reports')
+          .from('nirbacon_crime')              // ✅ Fixed: was 'reports'
           .select('location')
           .eq('id', reportId)
           .single();
@@ -365,7 +362,6 @@ class ReportService {
       final locationStr = response['location'] as String?;
       if (locationStr == null) return null;
 
-      // Parse POINT(lon lat) format
       final match = RegExp(r'POINT\(([^ ]+) ([^ ]+)\)').firstMatch(locationStr);
       if (match != null) {
         final lon = double.tryParse(match.group(1)!);
@@ -381,7 +377,7 @@ class ReportService {
     }
   }
 
-  // NEW: Quick check if image verification is needed for a category
+  // Check if image verification needed
   bool requiresImageVerification(String crimeCategory) {
     if (crimeCategory.isEmpty) return false;
 
@@ -394,7 +390,7 @@ class ReportService {
         crimeCategory.toLowerCase().contains(keyword.toLowerCase()));
   }
 
-  // NEW: Bulk verify multiple images
+  // Bulk verify multiple images
   Future<List<Map<String, dynamic>>> verifyMultipleImages({
     required List<XFile> images,
     required LatLng userLocation,
@@ -414,7 +410,7 @@ class ReportService {
     return results;
   }
 
-  // FIXED: Simple report submission without image verification (for non-killing categories)
+  // ✅ FIXED: Simple report submission - matching your schema
   Future<Map<String, dynamic>> submitSimpleReport({
     required String description,
     required LatLng location,
@@ -422,38 +418,41 @@ class ReportService {
     required String crimeCategory,
     required String userId,
     List<XFile> images = const [],
+    List<String> videos = const [],
     String? audioUrl,
     bool isEmergency = false,
   }) async {
     try {
-      debugPrint('📝 Starting simple report submission (no image verification)...');
+      debugPrint('📝 Starting simple report submission...');
+      debugPrint('📹 Videos to attach: ${videos.length}');
 
       final locationText = 'POINT(${location.longitude} ${location.latitude})';
 
+      // ✅ FIXED: Only include columns that exist in nirbacon_crime table
       final reportData = {
         'description': description,
         'location': locationText,
-        'area': area,
+        'area_static': area,           // ✅ Fixed: was 'area'
         'crime_type': crimeCategory,
-        'is_emergency': isEmergency,
         'user_id': userId,
-        'audio_url': audioUrl,
-        'votes': {'dangerous': 0, 'suspicious': 0, 'normal': 0, 'fake': 0},
-        'user_votes': {},
-        'verification_status': 'not_required',
-        'image_verified': false,
+        'status': 'active',            // ✅ Fixed: required by CHECK constraint
         'created_at': DateTime.now().toIso8601String(),
+        // REMOVED: is_emergency, audio_url, votes, user_votes,
+        //          verification_status, image_verified
       };
 
+      debugPrint('📊 Report data: $reportData');
+
       final reportResponse = await _supabase
-          .from('reports')
+          .from('nirbacon_crime')
           .insert(reportData)
           .select('id')
           .single();
 
       final reportId = reportResponse['id'] as String;
+      debugPrint('📄 Report created with ID: $reportId');
 
-      // Upload images without verification
+      // Upload images
       final imageUrls = <String>[];
       for (final image in images) {
         try {
@@ -462,19 +461,28 @@ class ReportService {
             reportId: reportId,
             userId: userId,
           );
-          imageUrls.add(imageUrl);
+          if (imageUrl.isNotEmpty) {
+            imageUrls.add(imageUrl);
+          }
         } catch (e) {
-          debugPrint('❌ Error uploading image: $e');
+          debugPrint('❌ Error uploading image ${image.name}: $e');
         }
       }
 
-      // FIXED: Only update the 'images' column, no other columns
+      // ✅ FIXED: Update correct table
+      final updateData = <String, dynamic>{};
       if (imageUrls.isNotEmpty) {
+        updateData['images'] = imageUrls;
+      }
+      if (videos.isNotEmpty) {
+        updateData['videos'] = videos;
+        debugPrint('📹 Attaching ${videos.length} videos to report');
+      }
+
+      if (updateData.isNotEmpty) {
         await _supabase
-            .from('reports')
-            .update({
-          'images': imageUrls,  // ← THIS IS THE ONLY COLUMN THAT EXISTS
-        })
+            .from('nirbacon_crime')           // ✅ Fixed: was 'reports'
+            .update(updateData)
             .eq('id', reportId);
       }
 
@@ -483,8 +491,8 @@ class ReportService {
         'report_id': reportId,
         'message': 'Report submitted successfully',
         'image_count': images.length,
+        'video_count': videos.length,
       };
-
     } catch (e) {
       debugPrint('❌ Simple report submission error: $e');
       return {

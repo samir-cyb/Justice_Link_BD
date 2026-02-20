@@ -73,7 +73,7 @@ class _ComplaintHistoryScreenState extends State<ComplaintHistoryScreen>
 
       // Load user's reports
       final reportsResponse = await _supabase
-          .from('reports')
+          .from('nirbacon_crime')
           .select('*')
           .eq('user_id', user.uid)
           .order('created_at', ascending: false);
@@ -110,7 +110,7 @@ class _ComplaintHistoryScreenState extends State<ComplaintHistoryScreen>
   void _subscribeToUpdates(String userId) {
     // Subscribe to reports changes
     _reportsSubscription = _supabase
-        .from('reports')
+        .from('nirbacon_crime')
         .stream(primaryKey: ['id'])
         .eq('user_id', userId)
         .listen((reports) {
@@ -853,7 +853,7 @@ class _ComplaintHistoryScreenState extends State<ComplaintHistoryScreen>
                         // Report ID
                         _buildDetailRow('Report ID', '#${reportId.substring(0, 8).toUpperCase()}'),
                         _buildDetailRow('Crime Type', report['crime_type'] ?? 'General'),
-                        _buildDetailRow('Location', '${report['city'] ?? 'Unknown'}${report['area'] != null ? ', ${report['area']}' : ''}'),
+                        _buildDetailRow('Location', '${report['area_static'] ?? 'Unknown'}${report['area_dynamic'] != null ? ', ${report['area_dynamic']}' : ''}'),
 
                         const Divider(height: 32, color: Colors.grey),
 

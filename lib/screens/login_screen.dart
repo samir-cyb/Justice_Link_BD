@@ -1,9 +1,11 @@
+
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:justice_link_user/services/auth_service.dart';
 import 'package:justice_link_user/widgets/animated_input_field.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -28,6 +30,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   String? _errorMessage;
   bool _showWelcomePopup = false;
   String _userName = '';
+  bool _rememberMe = true; // Default to true for auto-login
 
   @override
   void initState() {
@@ -74,78 +77,102 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
     SchedulerBinding.instance.addPostFrameCallback((_) {
       _controller.forward();
+      _checkAutoLogin();
     });
   }
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    _popupController.dispose();
-    super.dispose();
+  // Check if user is already logged in
+  Future<void> _checkAutoLogin() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedEmail = prefs.getString('saved_email');
+    final savedPassword = prefs.getString('saved_password');
+    final rememberMe = prefs.getBool('remember_me') ?? false;
+
+    if (rememberMe && savedEmail != null && savedPassword != null) {
+      setState(() {
+        _email = savedEmail;
+        _password = savedPassword;
+        _rememberMe = true;
+      });
+      
+      // Auto login
+      await _performLogin(savedEmail, savedPassword, showPopup: false);
+    }
   }
 
   Future<void> _submit() async {
     if (_formKey.currentState!.validate()) {
-      setState(() {
-        _isLoading = true;
-        _errorMessage = null;
-      });
       _formKey.currentState!.save();
+      await _performLogin(_email, _password, showPopup: true);
+    }
+  }
 
-      final authService = Provider.of<AuthService>(context, listen: false);
+  Future<void> _performLogin(String email, String password, {required bool showPopup}) async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
 
-      try {
-        await authService.signInWithEmailAndPassword(_email, _password);
-        if (authService.currentUser != null) {
-          // Fetch user name from UserModel
+    final authService = Provider.of<AuthService>(context, listen: false);
+
+    try {
+      await authService.signInWithEmailAndPassword(email, password);
+      
+      if (authService.currentUser != null) {
+        // Save credentials if remember me is checked
+        if (_rememberMe) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('saved_email', email);
+          await prefs.setString('saved_password', password);
+          await prefs.setBool('remember_me', true);
+        }
+
+        if (showPopup && mounted) {
           final userName = authService.currentUser?.fullName ?? 'User';
+          setState(() {
+            _userName = userName;
+            _showWelcomePopup = true;
+          });
 
+          _popupController.forward();
+
+          await Future.delayed(const Duration(milliseconds: 2000));
           if (mounted) {
-            setState(() {
-              _userName = userName;
-              _showWelcomePopup = true;
+            _popupController.reverse().then((_) {
+              if (mounted) {
+                Navigator.pushReplacementNamed(context, '/report');
+              }
             });
-
-            // Start popup animation
-            _popupController.forward();
-
-            // Wait for popup animation and a brief delay before navigating
-            await Future.delayed(const Duration(milliseconds: 2000));
-            if (mounted) {
-              _popupController.reverse().then((_) {
-                if (mounted) {
-                  Navigator.pushReplacementNamed(context, '/report');
-                }
-              });
-            }
           }
-        } else {
-          setState(() {
-            _errorMessage = 'Failed to load user data after login';
-          });
+        } else if (mounted) {
+          Navigator.pushReplacementNamed(context, '/report');
         }
-      } on AuthException catch (e) {
-        String errorMessage = 'Login failed. Please try again.';
-        if (e.message.contains('Invalid login credentials')) {
-          errorMessage = 'Invalid email or password';
-        } else if (e.message.contains('network')) {
-          errorMessage = 'Network error. Please check your connection.';
-        } else {
-          errorMessage = 'Authentication error: ${e.message}';
-        }
+      } else {
         setState(() {
-          _errorMessage = errorMessage;
+          _errorMessage = 'Failed to load user data after login';
         });
-      } catch (e) {
+      }
+    } on AuthException catch (e) {
+      String errorMessage = 'Login failed. Please try again.';
+      if (e.message.contains('Invalid login credentials')) {
+        errorMessage = 'Invalid email or password';
+      } else if (e.message.contains('network')) {
+        errorMessage = 'Network error. Please check your connection.';
+      } else {
+        errorMessage = 'Authentication error: ${e.message}';
+      }
+      setState(() {
+        _errorMessage = errorMessage;
+      });
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'Unexpected error: ${e.toString()}';
+      });
+    } finally {
+      if (mounted) {
         setState(() {
-          _errorMessage = 'Unexpected error: ${e.toString()}';
+          _isLoading = false;
         });
-      } finally {
-        if (mounted) {
-          setState(() {
-            _isLoading = false;
-          });
-        }
       }
     }
   }
@@ -192,6 +219,13 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         ],
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _popupController.dispose();
+    super.dispose();
   }
 
   @override
@@ -316,16 +350,38 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                       ),
                                     ),
                                     const SizedBox(height: 12),
-                                    Align(
-                                      alignment: Alignment.centerRight,
-                                      child: TextButton(
-                                        onPressed: _resetPassword,
-                                        style: TextButton.styleFrom(
-                                          foregroundColor: Colors.white.withOpacity(0.7),
+                                    
+                                    // Remember Me Checkbox
+                                    Row(
+                                      children: [
+                                        Checkbox(
+                                          value: _rememberMe,
+                                          onChanged: (value) {
+                                            setState(() {
+                                              _rememberMe = value ?? true;
+                                            });
+                                          },
+                                          fillColor: MaterialStateProperty.resolveWith(
+                                            (states) => states.contains(MaterialState.selected)
+                                                ? Theme.of(context).colorScheme.primary
+                                                : Colors.white54,
+                                          ),
                                         ),
-                                        child: const Text('Forgot Password?'),
-                                      ),
+                                        const Text(
+                                          'Remember me',
+                                          style: TextStyle(color: Colors.white70),
+                                        ),
+                                        const Spacer(),
+                                        TextButton(
+                                          onPressed: _resetPassword,
+                                          style: TextButton.styleFrom(
+                                            foregroundColor: Colors.white.withOpacity(0.7),
+                                          ),
+                                          child: const Text('Forgot Password?'),
+                                        ),
+                                      ],
                                     ),
+                                    
                                     const SizedBox(height: 30),
                                     AnimatedContainer(
                                       duration: const Duration(milliseconds: 300),
